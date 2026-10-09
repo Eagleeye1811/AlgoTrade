@@ -1,6 +1,5 @@
 import { FormEvent, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { BarChart3 } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { ErrorText } from '../components/ui'
 
@@ -23,7 +22,10 @@ export default function Login({ mode }: { mode: 'login' | 'register' }) {
   return (
     <div className="flex min-h-full items-center justify-center p-4">
       <form onSubmit={submit} className="panel w-full max-w-sm space-y-3 p-6">
-        <div className="flex items-center gap-2"><BarChart3 className="text-info" size={22} /><span className="text-xl font-bold text-white">AlgoTrade</span></div>
+        <div className="flex items-center gap-2.5">
+          <img src="/logo.png" alt="AlgoTrade" className="h-8 w-8 rounded-full object-contain" />
+          <span className="text-xl font-bold text-white">AlgoTrade</span>
+        </div>
         <p className="text-xs text-muted">Fault-tolerant algorithmic trading &amp; risk control · 021 developer sandbox (virtual funds, simulated exchange)</p>
         <h1 className="pt-2 text-sm font-semibold">{mode === 'login' ? 'Sign in' : 'Create account'}</h1>
         {mode === 'register' && <input className="input w-full" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} required />}

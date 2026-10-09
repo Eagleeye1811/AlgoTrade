@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Activity, ShieldCheck, BarChart3, Smartphone, ArrowRight, CheckCircle2, ServerCrash, CandlestickChart, LayoutDashboard } from 'lucide-react'
+import { Activity, ShieldCheck, Smartphone, ArrowRight, CheckCircle2, ServerCrash, CandlestickChart, LayoutDashboard } from 'lucide-react'
 
 export default function Landing() {
   useEffect(() => {
@@ -14,8 +14,8 @@ export default function Landing() {
       <nav className="sticky top-0 z-50 border-b border-white/5 bg-bg/90 backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-16 items-center justify-between">
-            <div className="flex items-center gap-2">
-              <BarChart3 className="text-info" size={24} />
+            <div className="flex items-center gap-2.5">
+              <img src="/logo.png" alt="AlgoTrade" className="h-8 w-8 rounded-full object-contain" />
               <span className="text-lg font-bold tracking-tight text-white">AlgoTrade</span>
             </div>
             <div className="hidden md:flex items-center gap-8 text-sm font-medium">
@@ -429,8 +429,8 @@ export default function Landing() {
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="grid md:grid-cols-4 gap-8 mb-12">
             <div className="md:col-span-2">
-              <div className="flex items-center gap-2 mb-4">
-                <BarChart3 className="text-muted" size={20} />
+              <div className="flex items-center gap-2.5 mb-4">
+                <img src="/logo.png" alt="AlgoTrade" className="h-7 w-7 rounded-full object-contain" />
                 <span className="text-base font-bold tracking-tight text-white">AlgoTrade</span>
               </div>
               <p className="text-sm text-muted max-w-sm">

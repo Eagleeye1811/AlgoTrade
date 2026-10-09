@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, AlertOctagon, BarChart3, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Receipt, Settings, ShieldCheck, Wallet } from 'lucide-react'
+import { Activity, AlertOctagon, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Receipt, Settings, ShieldCheck, Wallet } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useWsStatus } from '../hooks/useEvents'
@@ -94,7 +94,7 @@ function TopBar() {
     <header className="border-b border-line bg-panel">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2">
         <div className="flex items-center gap-2 pr-2">
-          <BarChart3 size={18} className="text-info" />
+          <img src="/logo.png" alt="AlgoTrade" className="h-6 w-6 rounded-full object-contain" />
           <span className="text-[15px] font-bold tracking-tight text-white">AlgoTrade</span>
         </div>
         <Badge tone="purple">021 sandbox · simulated exchange</Badge>
