@@ -95,11 +95,12 @@ class Strategy(TimestampMixin, Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(8), nullable=False, default="1m")
     quantity: Mapped[Decimal] = mapped_column(QTY, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)  # subscriber
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PAUSED")
     status_reason: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (
-        CheckConstraint("status in ('RUNNING','PAUSED','HALTED')", name="ck_strategy_status"),
+        CheckConstraint("status in ('RUNNING','PAUSED','HALTED','STOPPED')", name="ck_strategy_status"),
         CheckConstraint("quantity > 0", name="ck_strategy_qty_pos"),
     )
 
@@ -335,7 +336,7 @@ class FaultSimulation(Base):
 
 
 class MarketBar(Base):
-    """Cache of REAL historical bars fetched from the market-data API (used for replay)."""
+    """1m candles the platform built from 021 ticks (021 has no history endpoint): reloaded at startup."""
 
     __tablename__ = "market_bars"
     symbol: Mapped[str] = mapped_column(String(32), primary_key=True)

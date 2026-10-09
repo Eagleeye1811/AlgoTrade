@@ -44,12 +44,13 @@ async def risk_overview(_: User = Depends(current_user), sys: TradingSystem = De
     strategies = {}
     for sid, rt in sys.strategies.runtimes.items():
         st = snap["strategies"].get(sid, {})
-        pos = max((abs(sys.positions.get(sid, x).quantity) for x in rt.symbols), default=0)  # largest per-symbol position
+        pos = abs(sys.positions.get(sid, rt.symbol).quantity)
         s_orders = await sys.redis.count_in_window(f"orders:{sid}", 60)
         strategies[sid] = {
             "name": rt.name, "status": rt.status, "status_reason": rt.status_reason, "symbol": rt.symbol,
             "meters": [
-                meter("Largest position (per stock)", pos, lim.s(sid, "max_position"), "shares"),
+                meter("Position", pos, lim.s(sid, "max_position"), "shares"),
+                meter("Loss today", -min(st.get("today_pnl", 0), 0), lim.daily_loss_limit(sid, rt.allocation), "INR"),
                 meter("Virtual margin", st.get("margin_used", 0) + st.get("reserved_margin", 0), rt.allocation, "INR"),
                 meter("Exposure", st.get("exposure", 0), lim.s(sid, "max_exposure"), "INR"),
                 meter("Orders (last 60s)", s_orders, lim.s(sid, "max_orders_per_min"), "orders"),

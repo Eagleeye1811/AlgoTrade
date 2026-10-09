@@ -3,6 +3,11 @@
 Compares orders, fills, positions and account cash. Repairs what can be repaired from authoritative
 broker data (missing fills, stale order statuses, position cache drift). Anything that cannot be
 explained blocks new orders (fail closed).
+
+External baseline: broker fills/orders the platform never recorded (e.g. the internal ledger was reset while the
+broker kept the day's trades) can be acknowledged by an ADMIN - only while the broker's net position equals the
+platform's for every symbol. Acknowledged ids are stored (system_state "recon_external") and audited, and are
+reported instead of blocking; anything new and unexplained still blocks.
 """
 from __future__ import annotations
 
@@ -16,7 +21,7 @@ from sqlalchemy import select
 from app.brokers.base import BrokerError
 from app.core.events import Event, new_id, utcnow
 from app.core.health import HEALTHY, WARNING
-from app.database.models import Fill, Order, Position, ReconciliationEvent
+from app.database.models import Fill, Order, Position, ReconciliationEvent, SystemState
 
 if TYPE_CHECKING:
     from app.engine.system import TradingSystem
@@ -24,6 +29,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("algotrade.recon")
 
 MATCHED, RESOLVED, UNRESOLVED, RECON_FAILED = "MATCHED", "MISMATCH_RESOLVED", "MISMATCH_UNRESOLVED", "FAILED"
+EXTERNAL_KEY = "recon_external"
 BROKER_TO_INTERNAL = {"OPEN": "ACKNOWLEDGED", "PARTIALLY_FILLED": "PARTIALLY_FILLED", "FILLED": "FILLED",
                       "CANCELLED": "CANCELLED", "REJECTED": "REJECTED"}
 
@@ -52,6 +58,51 @@ class Reconciler:
         if self._pending is not None and not self._pending.done():
             self._pending.cancel()
         self._pending = None
+
+    async def _external(self) -> dict[str, set[str]]:
+        async with self.sys.db.session() as s:
+            row = await s.get(SystemState, EXTERNAL_KEY)
+        v = row.value if row else {}
+        return {"fills": set(v.get("fills", [])), "orders": set(v.get("orders", []))}
+
+    async def adopt_baseline(self, actor: str) -> dict[str, Any]:
+        """Acknowledge broker fills/orders the platform cannot attribute as external to it. Refused unless the
+        broker's net position equals the platform's for every symbol (nothing unexplained is left open)."""
+        sys = self.sys
+        gw = sys.broker
+        async with self._lock:
+            b_orders = await gw.call("get_orders", gw.adapter.get_orders)
+            b_fills = await gw.call("get_fills", gw.adapter.get_fills)
+            b_positions = await gw.call("get_positions", gw.adapter.get_positions)
+            internal_net = sys.positions.net_by_symbol()
+            broker_net = {p.symbol: p.quantity for p in b_positions}
+            diff = {sym: (internal_net.get(sym, Decimal(0)), broker_net.get(sym, Decimal(0)))
+                    for sym in set(internal_net) | set(broker_net)
+                    if internal_net.get(sym, Decimal(0)) != broker_net.get(sym, Decimal(0))}
+            if diff:
+                raise ValueError("broker and platform positions differ (" + ", ".join(
+                    f"{sym}: platform {i:+} vs broker {b:+}" for sym, (i, b) in sorted(diff.items()))
+                    + ") - flatten on the broker or resolve the mismatch first")
+            async with sys.db.session() as s:
+                known_f = set((await s.execute(select(Fill.broker_fill_id))).scalars())
+                known_o = set((await s.execute(select(Order.client_order_id))).scalars())
+            ext = await self._external()
+            new_f = {f.fill_id for f in b_fills if f.fill_id not in known_f} - ext["fills"]
+            new_o = {o.broker_order_id for o in b_orders if o.client_order_id not in known_o} - ext["orders"]
+            val = {"fills": sorted(ext["fills"] | new_f), "orders": sorted(ext["orders"] | new_o),
+                   "adopted_at": utcnow().isoformat(), "by": actor}
+            async with sys.db.transaction() as s:
+                row = await s.get(SystemState, EXTERNAL_KEY)
+                if row:
+                    row.value = val
+                else:
+                    s.add(SystemState(key=EXTERNAL_KEY, value=val))
+        await sys.audit.record("RECON_BASELINE_ADOPTED", f"{actor} acknowledged {len(new_f)} broker fill(s) and {len(new_o)} "
+                               "broker order(s) the platform has no record of as external (positions matched)",
+                               source="Reconciler", severity="WARN", actor=actor,
+                               payload={"fills": sorted(new_f), "orders": sorted(new_o)})
+        return {"acknowledged_fills": len(new_f), "acknowledged_orders": len(new_o),
+                "reconciliation": await self.run("BASELINE")}
 
     async def run(self, trigger: str, correlation_id: str | None = None) -> dict[str, Any]:
         async with self._lock:
@@ -96,7 +147,8 @@ class Reconciler:
         # ---------------------------------------------------------- 1. fills
         async with sys.db.session() as s:
             known = set((await s.execute(select(Fill.broker_fill_id))).scalars())
-        missing = [f for f in b_fills if f.fill_id not in known]
+        ext = await self._external()
+        missing = [f for f in b_fills if f.fill_id not in known and f.fill_id not in ext["fills"]]
         for f in missing:
             mismatches.append({"type": "MISSING_FILL", "detail": f"broker fill {f.fill_id} ({f.side} {f.quantity} {f.symbol} "
                                                                  f"@ {f.price}) missing internally"})
@@ -156,7 +208,7 @@ class Reconciler:
         async with sys.db.session() as s:
             all_ids = set((await s.execute(select(Order.client_order_id))).scalars())
         for bo in b_orders:
-            if bo.client_order_id not in all_ids:
+            if bo.client_order_id not in all_ids and bo.broker_order_id not in ext["orders"]:
                 unresolved.append({"type": "ORPHAN_BROKER_ORDER",
                                    "detail": f"broker order {bo.broker_order_id} ({bo.side} {bo.quantity} {bo.symbol}) has no internal record"})
 
@@ -190,15 +242,12 @@ class Reconciler:
                 unresolved.append({"type": "POSITION_MISMATCH", "detail": f"{sym}: internal {i_a:+} vs broker {b:+} after repair"})
 
         # ---------------------------------------------------------- 5. account cash
-        async with sys.db.session() as s:
-            fills = (await s.execute(select(Fill.side, Fill.quantity, Fill.price))).all()
-        cash_flow = sum(((-q * p) if side == "BUY" else (q * p) for side, q, p in fills), Decimal(0))
-        expected_cash = b_account.starting_cash + cash_flow
-        cash_diff = (b_account.cash - expected_cash).quantize(Decimal("0.01"))
-        account = {"broker_cash": b_account.cash, "internal_expected_cash": expected_cash.quantize(Decimal("0.01")),
-                   "difference": cash_diff, "broker_margin_used": b_account.margin_used}
-        if abs(cash_diff) > Decimal("1"):
-            unresolved.append({"type": "CASH_MISMATCH", "detail": f"broker cash differs from internal ledger by {cash_diff}"})
+        if b_account.extra.get("funds_api") is False:
+            account = {"funds_api": False, "note": f"{gw.adapter.name} exposes no funds endpoint - cash not reconciled"}
+        else:
+            ext_cash = sum(((-f.quantity * f.price) if f.side == "BUY" else (f.quantity * f.price)
+                            for f in b_fills if f.fill_id in ext["fills"]), Decimal(0))
+            account = await self._cash_check(b_account, unresolved, ext_cash)
 
         # ---------------------------------------------------------- outcome
         if unresolved:
@@ -210,7 +259,9 @@ class Reconciler:
         summary = {MATCHED: "internal state matches broker", RESOLVED: f"{len(mismatches)} mismatch(es) detected and repaired "
                    "from broker executions", UNRESOLVED: f"{len(unresolved)} unresolved mismatch(es) - new orders BLOCKED"}[status]
         details = {"comparison": comparison, "account": account, "unresolved": unresolved,
-                   "broker_orders": len(b_orders), "broker_fills": len(b_fills)}
+                   "broker_orders": len(b_orders), "broker_fills": len(b_fills),
+                   "external_acknowledged": {"fills": sum(1 for f in b_fills if f.fill_id in ext["fills"]),
+                                             "orders": sum(1 for o in b_orders if o.broker_order_id in ext["orders"])}}
         await self._finish(rec.id, status, mismatches, actions, summary, details)
         self.status = status
         if status == UNRESOLVED:
@@ -225,6 +276,17 @@ class Reconciler:
                                                              "actions": len(actions)})
         await sys.pnl.publish()
         return self.last
+
+    async def _cash_check(self, b_account, unresolved: list, external_cash: Decimal = Decimal(0)) -> dict:
+        async with self.sys.db.session() as s:
+            fills = (await s.execute(select(Fill.side, Fill.quantity, Fill.price))).all()
+        cash_flow = sum(((-q * p) if side == "BUY" else (q * p) for side, q, p in fills), Decimal(0))
+        expected_cash = b_account.starting_cash + cash_flow + external_cash  # + acknowledged external trades
+        cash_diff = (b_account.cash - expected_cash).quantize(Decimal("0.01"))
+        if abs(cash_diff) > Decimal("1"):
+            unresolved.append({"type": "CASH_MISMATCH", "detail": f"broker cash differs from internal ledger by {cash_diff}"})
+        return {"broker_cash": b_account.cash, "internal_expected_cash": expected_cash.quantize(Decimal("0.01")),
+                "difference": cash_diff, "broker_margin_used": b_account.margin_used}
 
     async def _finish(self, rec_id: int, status: str, mismatches: list, actions: list, summary: str, details: dict) -> None:
         import json

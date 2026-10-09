@@ -41,5 +41,3 @@ class Tick:
     # The real traded range of the source bar so far; the paper broker never fills outside it.
     range_high: Decimal | None = None
     range_low: Decimal | None = None
-    # Real open of the source bar (live feed): fixes a candle that was opened from a mid-minute price.
-    bar_open: Decimal | None = None

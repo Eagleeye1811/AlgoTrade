@@ -92,19 +92,16 @@ class CandleEngine:
                 w = None
             elif w is not None and b < w.ts:
                 continue  # out-of-order tick for an already-advanced bucket: ignore
-            # the source bar's real traded range (live: Yahoo's bar high/low; replay: range seen so far)
+            # a tick may carry the traded range it represents (test feed / simulator); otherwise its price only
             hi = max(tick.price, tick.range_high) if tick.range_high is not None else tick.price
             lo = min(tick.price, tick.range_low) if tick.range_low is not None else tick.price
             if w is None:
                 last = self._series(*key)
                 if last and last[-1].ts >= b:
                     continue  # tick belongs to an already closed candle
-                op = tick.bar_open if tick.bar_open is not None else tick.price
-                w = Bar(tick.symbol, b, op, max(hi, op), min(lo, op), tick.price, tick.volume)
+                w = Bar(tick.symbol, b, tick.price, hi, lo, tick.price, tick.volume)
             else:
                 w = replace(w, high=max(w.high, hi), low=min(w.low, lo), close=tick.price, volume=w.volume + tick.volume)
-                if tick.bar_open is not None and bucket(tick.ts, 60) == w.ts:  # source bar opens this candle
-                    w = replace(w, open=tick.bar_open, high=max(w.high, tick.bar_open), low=min(w.low, tick.bar_open))
             self.working[key] = w
             if self.on_update:
                 now = time.monotonic()

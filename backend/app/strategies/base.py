@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from app.market.models import Bar
@@ -21,6 +23,12 @@ class StrategySignal:
     reason: str
     indicators: dict[str, Any] = field(default_factory=dict)
     bar: Bar | None = None
+    # True when the entry conditions are not met but the signal is still a valid exit: it may close an
+    # opposite position, never open a new one.
+    close_only: bool = False
+    # entry order pricing requested by the strategy (default: market order)
+    order_type: str = "MARKET"
+    limit_price: Decimal | None = None
 
 
 @dataclass
@@ -49,12 +57,20 @@ class Strategy(ABC):
     display_name: str = ""
     description: str = ""
     param_specs: list[ParamSpec] = []
+    # what drives the strategy: closed candles (default), every LTP update, and/or the IST clock
+    uses_candles: bool = True
+    uses_ticks: bool = False
+    uses_clock: bool = False
+    enforce_hours: bool = True  # set by the engine from settings.enforce_market_hours
+    max_entries_per_day: int | None = None  # platform-enforced; None = unlimited
+    exit_at_level: bool = False  # stop-loss / target exits as a limit at the level (marketable), else market
 
     def __init__(self, strategy_id: str, symbol: str, params: dict[str, Any] | None = None, max_bars: int = 600):
         self.strategy_id = strategy_id
         self.symbol = symbol
         self.params = self.validate_parameters(params or {})
         self.bars: list[Bar] = []
+        self.bars5: list[Bar] = []  # closed 5m candles from the candle engine (higher-timeframe filters)
         self.max_bars = max_bars
         self.last_signal: StrategySignal = StrategySignal(HOLD, "warming up")
 
@@ -88,9 +104,10 @@ class Strategy(ABC):
     def get_parameters(self) -> dict[str, Any]:
         return dict(self.params)
 
-    def initialize(self, history: list[Bar]) -> None:
+    def initialize(self, history: list[Bar], history5: list[Bar] | None = None) -> None:
         """Warm indicators from history. History never produces trades."""
         self.bars = list(history[-self.max_bars:])
+        self.bars5 = list((history5 or [])[-self.max_bars:])
         if self.bars:
             sig = self.generate_signal()
             self.last_signal = StrategySignal(HOLD, f"warm-up complete ({len(self.bars)} bars); last evaluation: {sig.signal}",
@@ -107,12 +124,28 @@ class Strategy(ABC):
         self.last_signal = sig
         return sig
 
-    @abstractmethod
-    def generate_signal(self) -> StrategySignal: ...
+    def on_htf_candle(self, bar: Bar) -> None:
+        """A closed 5m candle. Strategies read self.bars5 when their 1m candle closes."""
+        if self.bars5 and bar.ts <= self.bars5[-1].ts:
+            return
+        self.bars5.append(bar)
+        if len(self.bars5) > self.max_bars:
+            self.bars5 = self.bars5[-self.max_bars:]
 
-    @abstractmethod
+    def on_tick(self, price: Decimal, ts: datetime, session_open: Decimal | None) -> StrategySignal | None:
+        """Tick-driven strategies: called on every LTP update while the strategy may enter."""
+        return None
+
+    def on_clock(self, now_ist: datetime) -> StrategySignal | None:
+        """Clock-driven strategies: called every second (IST market time) while the strategy may enter."""
+        return None
+
+    def generate_signal(self) -> StrategySignal:
+        return StrategySignal(HOLD, "not candle-driven")
+
     def series(self) -> dict[str, list[dict[str, Any]]]:
         """Indicator series aligned with self.bars for charting."""
+        return {}
 
     @property
     def min_bars(self) -> int:

@@ -1,7 +1,7 @@
 """Paper Broker Simulator - an independent backend execution venue.
 
 * Keeps its OWN persistent state (schema `paper_broker`): account cash, orders, fills, positions.
-* Matches orders against the live/replayed market ticks it observes (like an exchange would).
+* Matches orders against the market ticks it observes (like an exchange would).
   Fill prices include modelled slippage but are clamped to the real traded range of the current bar,
   so a fill never contradicts the market.
 * Simulates API latency, timeouts with lost responses, outages, rejections, partial / delayed fills,

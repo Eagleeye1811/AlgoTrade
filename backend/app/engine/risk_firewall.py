@@ -117,6 +117,9 @@ class LatencyGuard:
         return checks, order_type, limit_price
 
 
+EMERGENCY_ORIGINS = ("KILL_SWITCH", "CIRCUIT_BREAKER")
+
+
 class RiskFirewall:
     def __init__(self, system: "TradingSystem"):
         self.sys = system
@@ -126,7 +129,8 @@ class RiskFirewall:
 
     async def evaluate(self, intent: OrderIntent, order_id: str | None = None) -> RiskDecision:
         sys, lim = self.sys, self.sys.limits
-        emergency = intent.origin == "KILL_SWITCH"
+        # risk-reducing emergency closes (kill switch, circuit-breaker flatten) pass the gates that would trap a position
+        emergency = intent.origin in EMERGENCY_ORIGINS and intent.reduce_only
         reduce = intent.reduce_only
         checks: list[RiskCheck] = []
         add = checks.append
@@ -226,7 +230,8 @@ class RiskFirewall:
             why_skip = "risk-reducing order" if reduce else "no price/strategy"
             for rule, label in (("MAX_POSITION", "Strategy max position"), ("STRATEGY_MARGIN", "Virtual margin (allocation)"),
                                 ("STRATEGY_EXPOSURE", "Strategy exposure"), ("GLOBAL_EXPOSURE", "Overall exposure"),
-                                ("AVAILABLE_CAPITAL", "Available capital"), ("DAILY_LOSS", "Daily loss limit")):
+                                ("AVAILABLE_CAPITAL", "Available capital"), ("STRATEGY_DAILY_LOSS", "Strategy daily loss limit"),
+                                ("DAILY_LOSS", "Daily loss limit")):
                 if price is None and not reduce:
                     add(RiskCheck(rule, label, FAIL, "no price", "-", "cannot size risk without a market price"))
                 else:
@@ -243,6 +248,7 @@ class RiskFirewall:
             alloc = st["allocation"]
             add(RiskCheck("STRATEGY_MARGIN", "Virtual margin (allocation)", FAIL if used + order_margin > alloc else PASS,
                           inr(used + order_margin), inr(alloc),
+                          "the strategy has no capital allocated - set its allocation (Strategies → Configure)" if alloc <= 0 else
                           f"order needs {inr(order_margin)} margin but only {inr(alloc - used)} of the strategy's "
                           f"{inr(alloc)} allocation is free" if used + order_margin > alloc else ""))
             notional = intent.quantity * price
@@ -257,6 +263,12 @@ class RiskFirewall:
             avail = port["available_capital"]
             add(RiskCheck("AVAILABLE_CAPITAL", "Available capital", FAIL if order_margin > avail else PASS,
                           inr(order_margin), inr(avail), "insufficient available capital" if order_margin > avail else ""))
+            s_loss = -min(st.get("today_pnl", Decimal(0)), Decimal(0))
+            s_max_loss = lim.daily_loss_limit(intent.strategy_id, st["allocation"])
+            add(RiskCheck("STRATEGY_DAILY_LOSS", "Strategy daily loss limit", FAIL if s_loss >= s_max_loss else PASS,
+                          inr(s_loss), inr(s_max_loss),
+                          "strategy's maximum loss for the day reached - only risk-reducing orders allowed"
+                          if s_loss >= s_max_loss else ""))
             loss = -min(port["today_pnl"], Decimal(0))
             max_loss = lim.g("max_daily_loss")
             add(RiskCheck("DAILY_LOSS", "Daily loss limit", FAIL if loss >= max_loss else PASS, inr(loss), inr(max_loss),
@@ -299,7 +311,8 @@ class RiskFirewall:
         mx = int(self.sys.limits.g("max_rejections_per_min"))
         rt = self.sys.strategies.runtimes.get(intent.strategy_id)
         if cnt >= mx and rt is not None and rt.status == "RUNNING":
-            await self.sys.strategies.set_status(
-                intent.strategy_id, "HALTED",
-                f"circuit breaker: {cnt} risk rejections in 60s (limit {mx}) - possible runaway strategy",
-                actor="RiskFirewall", correlation_id=intent.correlation_id)
+            reason = f"circuit breaker: {cnt} risk rejections in 60s (limit {mx}) - possible runaway strategy"
+            await self.sys.strategies.set_status(intent.strategy_id, "HALTED", reason, actor="RiskFirewall",
+                                                 correlation_id=intent.correlation_id)
+            # flatten in the background: this runs inside an order submission that holds the strategy's order lock
+            self.sys.strategies.start_flatten(intent.strategy_id, reason, intent.correlation_id)

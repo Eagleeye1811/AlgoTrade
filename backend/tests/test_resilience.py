@@ -141,7 +141,7 @@ async def test_kill_switch_flattens_and_enters_safe_mode(trading):
     assert await wait_for(lambda: o["id"] not in sys_.orders.open_orders)
     pending = (await sys_.strategies.handle_signal("macd", "BUY", "x", origin="FAULT_LAB", quantity=D(10),
                                                    order_type="LIMIT", limit_price=D("900")))["order"]
-    state = await sys_.kill_switch.activate("test", "unit test", close_timeout_s=3)
+    state = await sys_.kill_switch.activate("test", "unit test", deadline_s=3)
     assert sys_.controller.status == "SAFE_MODE"
     assert any(c["order_id"] == pending["id"] for c in state["cancelled"])
     assert state["close_orders"][0]["side"] == "SELL" and state["close_orders"][0]["quantity"] == D(100)
@@ -164,7 +164,7 @@ async def test_kill_switch_reports_unresolved_positions(trading):
     await sys_.market.provider.push("RELIANCE", "1000")
     assert await wait_for(lambda: o["id"] not in sys_.orders.open_orders)
     sys_.broker.adapter.faults.network_down_until = time.time() + 60  # broker gone: cannot flatten
-    await sys_.kill_switch.activate("test", "unit test", wait=True, close_timeout_s=1)
+    await sys_.kill_switch.activate("test", "unit test", wait=True, deadline_s=1)
     st = sys_.kill_switch.state
     assert st["phase"] == "COMPLETED_WITH_ERRORS"
     assert st["unresolved"] and st["unresolved"][0]["symbol"] == "RELIANCE"
@@ -220,3 +220,97 @@ async def test_fault_lab_disarms_faults_when_aborted(trading):
     res = await sys_.faults.run("network_timeout", "test", {"strategy_id": "macd"})
     assert res["status"] == "ABORTED"
     assert sys_.broker.adapter.faults.timeout_next_place == 0
+
+
+async def test_kill_switch_flattens_several_strategies_within_10s(trading):
+    """L3: stop all strategies, cancel open orders and close positions within 10 seconds."""
+    import asyncio as aio
+    sys_ = trading
+    # long and short books on the same stock plus a position on another stock and a working order
+    for sid, side in (("rsi_ema", "BUY"), ("macd", "SELL"), ("breakout", "BUY")):
+        await sys_.strategies.handle_signal(sid, side, "x", origin="STRATEGY")
+    await sys_.market.provider.push("RELIANCE", "1000")
+    await sys_.market.provider.push("INFY", "1500")
+    assert await wait_for(lambda: not sys_.orders.open_orders)
+    await sys_.strategies.handle_signal("ema_trend", "BUY", "x", origin="FAULT_LAB", quantity=D(5),
+                                        order_type="LIMIT", limit_price=D("900"))
+    feed_running = True
+
+    async def feed():  # the market keeps ticking so close orders can fill
+        while feed_running:
+            await sys_.market.provider.push("RELIANCE", "1000")
+            await sys_.market.provider.push("INFY", "1500")
+            await aio.sleep(0.2)
+    t = aio.create_task(feed())
+    try:
+        await sys_.kill_switch.activate("test", "L3 deadline", wait=True)
+    finally:
+        feed_running = False
+        await t
+    st = sys_.kill_switch.state
+    assert st["phase"] == "COMPLETED" and st["within_deadline"] and st["elapsed_s"] <= 10
+    assert all(p.quantity == 0 for p in sys_.positions.all()) and not sys_.orders.open_orders
+    assert {c["strategy_id"] for c in st["close_orders"]} == {"rsi_ema", "macd", "breakout"}
+
+
+async def test_circuit_breaker_halts_and_flattens_only_the_runaway(trading):
+    """Runaway with risk on: the breaker halts the strategy, cancels its working orders and closes its position;
+    another strategy's position in the same stock is untouched."""
+    import asyncio as aio
+    sys_ = trading
+    a = (await sys_.strategies.handle_signal("macd", "BUY", "x", origin="STRATEGY"))["order"]
+    b = (await sys_.strategies.handle_signal("rsi_ema", "BUY", "x", origin="STRATEGY"))["order"]
+    await sys_.market.provider.push("RELIANCE", "1000")
+    assert await wait_for(lambda: not sys_.orders.open_orders)
+    feeding = True
+
+    async def feed():
+        while feeding:
+            await sys_.market.provider.push("RELIANCE", "1000", advance_s=0)
+            await aio.sleep(0.2)
+    t = aio.create_task(feed())
+    try:
+        await sys_.strategies.start_runaway("macd", 8.0, 0.05)
+        rt = sys_.strategies.runtimes["macd"]
+        assert rt.status == "HALTED" and "circuit breaker" in rt.status_reason
+        fl = await rt.flatten_task
+    finally:
+        feeding = False
+        await t
+    assert fl["flat"] and sys_.positions.get("macd", "RELIANCE").quantity == 0
+    assert all(c["status"] != "REJECTED" for c in fl["close_orders"])
+    assert sys_.positions.get("rsi_ema", "RELIANCE").quantity == D(100)  # untouched
+    assert sys_.strategies.runtimes["rsi_ema"].status == "RUNNING"
+
+
+async def test_adopt_baseline_acknowledges_external_trades_only_when_flat(trading):
+    sys_ = trading
+    import asyncio
+
+    import pytest
+
+    from app.brokers.base import PlaceOrderRequest
+
+    # trades made at the broker outside AlgoTrade (e.g. the internal ledger was reset afterwards)
+    await sys_.broker.adapter.place_order(PlaceOrderRequest("EXTERNAL-1", "RELIANCE", "BUY", D(7)))
+    await sys_.market.provider.push("RELIANCE", "1000")
+    await asyncio.sleep(0.3)
+    with pytest.raises(ValueError, match="positions differ"):  # broker +7 vs platform 0: never acknowledged
+        await sys_.reconciler.adopt_baseline("admin")
+    await sys_.broker.adapter.place_order(PlaceOrderRequest("EXTERNAL-2", "RELIANCE", "SELL", D(7)))
+    await sys_.market.provider.push("RELIANCE", "1001")
+    await asyncio.sleep(0.3)
+    assert (await sys_.reconciler.run("TEST"))["status"] == "MISMATCH_UNRESOLVED"
+
+    out = await sys_.reconciler.adopt_baseline("admin")
+    assert out["acknowledged_fills"] >= 2 and out["acknowledged_orders"] == 2
+    assert out["reconciliation"]["status"] == "MATCHED", out["reconciliation"]["details"]["unresolved"]
+    assert out["reconciliation"]["details"]["external_acknowledged"]["orders"] == 2
+    assert "reconciliation" not in sys_.controller.blocks
+
+    # anything new and unexplained still blocks
+    await sys_.broker.adapter.place_order(PlaceOrderRequest("EXTERNAL-3", "RELIANCE", "BUY", D(3)))
+    await sys_.market.provider.push("RELIANCE", "1002")
+    await asyncio.sleep(0.3)
+    assert (await sys_.reconciler.run("TEST"))["status"] == "MISMATCH_UNRESOLVED"
+    assert "reconciliation" in sys_.controller.blocks

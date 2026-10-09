@@ -63,7 +63,11 @@ class BrokerGateway:
             self._record_latency((time.perf_counter() - t) * 1000, t)
             await self._fail(op, str(e) or type(e).__name__)
             raise
-        self._record_latency((time.perf_counter() - t) * 1000, t)
+        if op == "ping" and getattr(self.adapter, "ping_returns_latency", False):
+            # the adapter reports the round-trip of its recent real API calls (its ping avoids extra requests)
+            self._record_latency(float(res), t)
+        else:
+            self._record_latency((time.perf_counter() - t) * 1000, t)
         self._ok()
         return res
 

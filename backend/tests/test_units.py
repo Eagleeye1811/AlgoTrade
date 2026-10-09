@@ -1,10 +1,8 @@
 """Pure unit tests: market data parsing, candle generation, indicators/strategies, position math."""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
@@ -13,8 +11,6 @@ from app.engine.risk_firewall import inr
 from app.engine.types import OrderIntent
 from app.market.candle_engine import CandleEngine
 from app.market.models import Bar, Tick
-from app.market.providers import ohlc_path
-from app.market.yahoo import MarketDataError, parse_chart
 from app.strategies.base import BUY, HOLD, SELL
 from app.strategies.breakout import BreakoutStrategy
 from app.strategies.indicators import ema, macd, rsi
@@ -29,36 +25,6 @@ def bar(i: int, c: float, o: float | None = None, h: float | None = None, l: flo
     o = c if o is None else o
     return Bar(sym, T0 + timedelta(minutes=i), D(str(o)), D(str(h if h is not None else max(o, c))),
                D(str(l if l is not None else min(o, c))), D(str(c)), D(v))
-
-
-# ---------------------------------------------------------------- market data parsing
-def test_parse_chart_drops_malformed_bars():
-    data = {"chart": {"result": [{"meta": {}, "timestamp": [1, 61, 121, 181],
-                                  "indicators": {"quote": [{"open": [10, None, 10, 10], "high": [11, 11, 9, 11],
-                                                            "low": [9, 9, 10, 9], "close": [10.5, 10, 10, 10.2],
-                                                            "volume": [100, 100, 100, None]}]}}]}}
-    bars, _, dropped = parse_chart("X", data)
-    assert len(bars) == 1 and dropped == 3  # null open, high<low, null volume
-    assert bars[0].close == D("10.50")
-
-
-def test_parse_chart_rejects_garbage():
-    with pytest.raises(MarketDataError):
-        parse_chart("X", {"chart": {"result": None, "error": {"code": "Not Found"}}})
-
-
-def test_real_snapshot_is_parseable():
-    f = Path(__file__).resolve().parent.parent / "data" / "replay" / "RELIANCE_1m.json"
-    bars, meta, dropped = parse_chart("RELIANCE", json.loads(f.read_text()))
-    assert len(bars) > 1000 and meta.get("exchangeName") == "NSI"
-    assert all(b.low <= b.open <= b.high and b.low <= b.close <= b.high for b in bars)
-
-
-def test_ohlc_path_uses_only_real_values():
-    b = bar(0, 101, o=100, h=103, l=99)
-    assert ohlc_path(b) == [D(100), D(99), D(103), D(101)]
-    b2 = bar(0, 99, o=100, h=103, l=98)
-    assert ohlc_path(b2) == [D(100), D(103), D(98), D(99)]
 
 
 # ---------------------------------------------------------------- candle engine
@@ -185,30 +151,3 @@ def test_order_intent_rejects_fractional_quantity():
     with pytest.raises(ValueError):
         OrderIntent("macd", "X", "BUY", D("1.5"))
     assert OrderIntent("macd", "X", "BUY", D("600.0000")).quantity == D(600)
-
-
-# ---------------------------------------------------------------- real-time replay path
-@pytest.mark.parametrize("o,h,l,c", [(100, 103, 99, 101), (100, 103, 98, 99), (100, 100, 100, 100), (1177.4, 1178.0, 1176.85, 1177.9)])
-def test_interpolated_path_respects_real_bar(o, h, l, c):
-    from app.market.providers import interpolated_path
-
-    b = bar(0, c, o=o, h=h, l=l)
-    path = interpolated_path(b, 60)
-    prices = [p for p, _ in path]
-    assert len(path) == 60
-    assert prices[0] == b.open and prices[-1] == b.close           # starts at real open, ends at real close
-    assert max(prices) == b.high and min(prices) == b.low           # real extremes are reached exactly
-    assert all(b.low <= p <= b.high for p in prices)                # never outside the real traded range
-    real = [p for p, is_real in path if is_real]
-    assert real == ohlc_path(b)                                     # waypoints are the real O/L/H/C in order
-
-
-def test_replay_tick_density_scales_with_speed():
-    from app.market.providers import ReplayProvider
-
-    p = ReplayProvider(["X"], None, None, "data/replay", speed=1.0)
-    assert p.ticks_per_bar == 60 and p.step_s == pytest.approx(1.0)  # real time: 1 tick/second
-    p.speed = 30
-    assert p.ticks_per_bar == 20 and p.step_s == pytest.approx(0.1)
-    p.speed = 600
-    assert p.ticks_per_bar == 4                                      # never fewer than the 4 real points

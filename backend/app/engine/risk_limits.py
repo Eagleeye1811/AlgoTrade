@@ -28,7 +28,9 @@ STRATEGY_DEFAULTS: dict[str, tuple[Decimal | None, str]] = {
     "max_position": (Decimal(500), "Maximum strategy position (shares)"),
     "max_orders_per_min": (Decimal(15), "Strategy order rate (orders / 60s)"),
     "max_exposure": (None, "Maximum strategy exposure (INR, defaults to allocation)"),
+    "max_daily_loss": (None, "Maximum strategy loss for the day (INR, defaults to 5% of allocation)"),
 }
+DAILY_LOSS_DEFAULT_FRACTION = Decimal("0.05")
 
 
 class RiskLimitStore:
@@ -44,8 +46,11 @@ class RiskLimitStore:
                     s.add(RiskLimit(scope="GLOBAL", strategy_id=None, name=name, value=v))
             for sid, alloc in allocations.items():
                 for name, (v, _) in STRATEGY_DEFAULTS.items():
-                    await s.execute(pg_insert(RiskLimit).values(scope="STRATEGY", strategy_id=sid, name=name,
-                                                                value=v if v is not None else alloc)
+                    if name == "max_daily_loss":
+                        continue  # no stored default: derived from the current allocation (daily_loss_limit)
+                    if v is None:
+                        v = alloc
+                    await s.execute(pg_insert(RiskLimit).values(scope="STRATEGY", strategy_id=sid, name=name, value=v)
                                     .on_conflict_do_nothing())
         await self.load()
 
@@ -56,6 +61,11 @@ class RiskLimitStore:
 
     def g(self, name: str) -> Decimal:
         return self.values.get(("GLOBAL", None, name), GLOBAL_DEFAULTS[name][0])
+
+    def daily_loss_limit(self, strategy_id: str, allocation: Decimal) -> Decimal:
+        """Max loss for the day: the value the user set, else 5% of the strategy's current allocation."""
+        v = self.values.get(("STRATEGY", strategy_id, "max_daily_loss"))
+        return v if v is not None else (Decimal(allocation) * DAILY_LOSS_DEFAULT_FRACTION).quantize(Decimal(1))
 
     def s(self, strategy_id: str, name: str) -> Decimal:
         v = self.values.get(("STRATEGY", strategy_id, name))

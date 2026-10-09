@@ -16,6 +16,10 @@ from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 
+from app.brokers.base import BrokerAdapter
+from app.brokers.o21_adapter import O21Adapter
+from app.brokers.o21_client import O21Client
+from app.brokers.o21_instruments import InstrumentStore
 from app.brokers.paper_broker import PaperBrokerSimulator
 from app.config import Settings
 from app.core.audit import Audit, StateStore
@@ -23,6 +27,7 @@ from app.core.events import Event, EventBus
 from app.core.health import HEALTHY, WARNING, HealthRegistry
 from app.core.redis_client import RedisClient
 from app.core.ws import WSManager
+from app.engine.charges import ChargesTable
 from app.database.models import Order, StrategyAllocation, TradingAccount
 from app.database.session import Database
 from app.engine.broker_gateway import BrokerGateway
@@ -32,7 +37,7 @@ from app.engine.pnl_engine import PnLEngine
 from app.engine.position_manager import PositionManager
 from app.engine.risk_firewall import RiskFirewall
 from app.engine.risk_limits import RiskLimitStore
-from app.engine.strategy_engine import DEFAULT_STRATEGIES, StrategyEngine
+from app.engine.strategy_engine import StrategyEngine
 from app.market.service import MarketDataService
 from app.resilience.demo import DemoMode
 from app.resilience.fault_simulator import FaultSimulator
@@ -60,6 +65,10 @@ class TradingSystem:
         self.bus.set_fanout(self.ws.fanout)
 
         self.account: TradingAccount | None = None
+        # one 021 client per process: one access token per account (a new login revokes the previous one)
+        self.o21 = O21Client(settings.o21_base_url, settings.o21_username, settings.o21_password,
+                             settings.o21_timeout_s, settings.o21_rate_per_s)
+        self.instruments = InstrumentStore(settings.instruments_dir)
         self.controller = TradingController(self)
         self.limits = RiskLimitStore(self)
         self.market = MarketDataService(self)
@@ -68,11 +77,8 @@ class TradingSystem:
         self.risk = RiskFirewall(self)
         self.strategies = StrategyEngine(self)
         self.pnl = PnLEngine(self)
-        adapter = PaperBrokerSimulator(
-            self.db, seed=settings.broker_seed, base_latency_ms=settings.broker_base_latency_ms,
-            jitter_ms=settings.broker_jitter_ms, max_participation=settings.broker_max_participation,
-            slippage_bps=settings.broker_slippage_bps, timeout_s=settings.broker_timeout_s,
-            margin_rate=settings.margin_rate)
+        self.charges = ChargesTable.load(settings.charges_table_path)
+        adapter = self._make_adapter()
         adapter.on_execution = self.orders.on_execution
         adapter.on_order_update = self.orders.on_order_update
         self.broker = BrokerGateway(self, adapter)
@@ -81,8 +87,9 @@ class TradingSystem:
         self.faults = FaultSimulator(self)
         self.demo = DemoMode(self)
 
-        # wiring: venue observes the market; strategies consume closed candles
-        self.market.tick_listeners.append(adapter.on_market_tick)
+        # wiring: strategies consume closed candles and ticks; the local simulator also needs ticks to fill
+        if isinstance(adapter, PaperBrokerSimulator):
+            self.market.tick_listeners.append(adapter.on_market_tick)
         self.market.candles.on_closed.append(self.strategies.on_candle_closed)
         self.market.tick_listeners.append(self.strategies.on_tick)
 
@@ -90,6 +97,25 @@ class TradingSystem:
         self._global_tasks: list[asyncio.Task] = []
         self.started_at = time.time()
         self.last_recovery: dict[str, Any] | None = None
+
+    def _make_adapter(self) -> BrokerAdapter:
+        s = self.settings
+        if s.broker_mode.lower() == "paper":
+            return PaperBrokerSimulator(self.db, seed=s.broker_seed, base_latency_ms=s.broker_base_latency_ms,
+                                        jitter_ms=s.broker_jitter_ms, max_participation=s.broker_max_participation,
+                                        slippage_bps=s.broker_slippage_bps, timeout_s=s.broker_timeout_s,
+                                        margin_rate=s.margin_rate)
+        adapter = O21Adapter(self.o21, self.instruments, s.o21_ws_orders_url)
+        adapter.client_id_for = self._client_id_for_broker_order
+        return adapter
+
+    async def _client_id_for_broker_order(self, broker_order_id: str) -> str | None:
+        async with self.db.session() as s:
+            return (await s.execute(select(Order.client_order_id).where(Order.broker_order_id == broker_order_id))).scalar()
+
+    @property
+    def is_paper(self) -> bool:
+        return isinstance(self.broker.adapter, PaperBrokerSimulator)
 
     # ------------------------------------------------------------------ process lifecycle
     async def startup(self) -> None:
@@ -103,6 +129,7 @@ class TradingSystem:
             t.cancel()
         await self.stop_engine()
         await self.market.close()
+        await self.o21.close()
         await self.ws.stop()
         await self.redis.close()
         await self.db.dispose()
@@ -123,8 +150,7 @@ class TradingSystem:
             self.account = (await s.execute(select(TradingAccount).order_by(TradingAccount.id))).scalars().first()
         await self.controller.load()
         await self.kill_switch.load()
-        capital = self.account.starting_capital if self.account else self.settings.starting_capital
-        await self.strategies.ensure_defaults(capital)
+        await self.strategies.ensure_defaults()
         async with self.db.session() as s:
             allocs = {a.strategy_id: a.allocated_capital for a in (await s.execute(select(StrategyAllocation))).scalars()}
         await self.limits.ensure_defaults(allocs)
@@ -155,7 +181,7 @@ class TradingSystem:
                 await self.broker.call("connect", lambda: self.broker.adapter.connect(self.account.broker_account_id))
                 self.broker.start()
                 await rep("4. Connected to broker", f"{self.broker.adapter.name} account {self.account.broker_account_id} "
-                                                    f"(PAPER TRADING - SIMULATED EXECUTION)")
+                                                    f"({'local simulator' if self.is_paper else '021 sandbox - simulated exchange, virtual funds'})")
             except Exception as e:
                 await rep("4. Broker connection FAILED", str(e), "error")
             # 5. reconcile
@@ -224,13 +250,20 @@ class TradingSystem:
             raise ValueError("trading account already configured")
         if capital < Decimal(100000):
             raise ValueError("starting capital must be at least ₹1,00,000")
-        allocations = allocations or {sid: (capital * frac).quantize(Decimal(1)) for sid, _, _, _, frac in DEFAULT_STRATEGIES}
+        allocations = allocations or {}  # nothing allocated automatically: users allocate per strategy
         if sum(allocations.values()) > capital:
             raise ValueError("strategy allocations exceed starting capital")
-        broker_acct = "PAPER-" + uuid.uuid4().hex[:8].upper()
-        await self.broker.adapter.open_account(broker_acct, capital)
+        if self.is_paper:
+            broker_acct, acct_type = "PAPER-" + uuid.uuid4().hex[:8].upper(), "PAPER"
+            await self.broker.adapter.open_account(broker_acct, capital)
+        else:
+            if not self.settings.o21_username:
+                raise ValueError("021 credentials are not configured (ALGOTRADE_O21_USERNAME / ALGOTRADE_O21_PASSWORD in backend/.env)")
+            if capital > Decimal(1000000):
+                raise ValueError("the 021 sandbox account has ₹10,00,000 of virtual funds per day - capital cannot exceed it")
+            broker_acct, acct_type = self.settings.o21_username, "O21_SANDBOX"
         async with self.db.transaction() as s:
-            acct = TradingAccount(name=name, account_type="PAPER", broker=self.broker.adapter.name,
+            acct = TradingAccount(name=name, account_type=acct_type, broker=self.broker.adapter.name,
                                   broker_account_id=broker_acct, starting_capital=capital, created_by=user_id)
             s.add(acct)
             for sid, amt in allocations.items():
@@ -246,7 +279,7 @@ class TradingSystem:
         await self.broker.call("connect", lambda: self.broker.adapter.connect(broker_acct))
         self.broker.start()
         await self.controller.unblock("account", "- account configured")
-        await self.audit.record("ACCOUNT_CREATED", f"paper trading account {broker_acct} created with capital ₹{capital:,.0f}",
+        await self.audit.record("ACCOUNT_CREATED", f"{acct_type} trading account {broker_acct} configured with capital ₹{capital:,.0f}",
                                 source="Account", actor=actor, payload={"allocations": allocations})
         await self.reconciler.run("ACCOUNT_SETUP")
         return acct

@@ -82,6 +82,8 @@ class FaultSimulator:
         "duplicate_order": ("Duplicate order attempt", "The same order (idempotency key) is submitted twice"),
         "stale_data": ("Stale market data", "Market feed freezes; prices stop updating"),
     }
+    # need the local simulator: a real exchange cannot be told to fill only 40% of an order
+    SIMULATOR_ONLY = {"partial_fill"}
     # (scenario, target strategy) - spread across strategies so per-strategy order-rate limits stay meaningful
     CHAOS_PLAN = [("high_latency", "macd"), ("network_timeout", "rsi_ema"), ("duplicate_order", "breakout"),
                   ("position_mismatch", "macd"), ("partial_fill", "rsi_ema")]
@@ -95,7 +97,14 @@ class FaultSimulator:
 
     # ------------------------------------------------------------------ helpers
     def catalog(self) -> list[dict[str, str]]:
-        return [{"key": k, "title": t, "description": d} for k, (t, d) in self.SCENARIOS.items()]
+        return [{"key": k, "title": t, "description": d,
+                 "available": self.sys.is_paper or k not in self.SIMULATOR_ONLY} for k, (t, d) in self.SCENARIOS.items()]
+
+    def _plan(self) -> list[tuple[str, str]]:
+        plan = [(sc, sid) for sc, sid in self.CHAOS_PLAN if self.sys.is_paper or sc not in self.SIMULATOR_ONLY]
+        # target strategies that exist in this deployment (the demo subscriptions differ between modes)
+        ids = list(self.sys.strategies.runtimes)
+        return [(sc, sid if sid in self.sys.strategies.runtimes else ids[i % len(ids)]) for i, (sc, sid) in enumerate(plan)] if ids else []
 
     def _target(self, params: dict) -> str:
         sid = params.get("strategy_id") or "macd"
@@ -159,6 +168,8 @@ class FaultSimulator:
     async def run(self, scenario: str, actor: str, params: dict | None = None, run_group: str | None = None) -> dict:
         if scenario not in self.SCENARIOS:
             raise ValueError(f"unknown scenario {scenario}")
+        if scenario in self.SIMULATOR_ONLY and not self.sys.is_paper:
+            raise ValueError(f"'{self.SCENARIOS[scenario][0]}' needs the local simulator - it cannot be forced on the 021 exchange")
         params = params or {}
         async with self._lock:
             corr = new_id()
@@ -409,10 +420,20 @@ class FaultSimulator:
             rules[rule] = rules.get(rule, 0) + 1
         await tl.step(RESPONSE, f"{len(results)} signals -> {len(approved)} orders reached broker, {len(rejected)} rejected",
                       ", ".join(f"{k}: {v}" for k, v in rules.items()) or "-", "warn", {"rules": rules})
-        await tl.step(RECOVERY, f"Strategy {rt.status}", rt.status_reason or "", "ok" if rt.status == "HALTED" else "warn")
-        final = f"{rt.name} {rt.status}; other strategies unaffected"
-        await tl.step(FINAL, "RUNAWAY CONTAINED" if rt.status == "HALTED" else "CHECK STRATEGY", final,
-                      "ok" if rt.status == "HALTED" else "warn")
+        await tl.step(RECOVERY, f"Circuit breaker: strategy {rt.status}", rt.status_reason or "", "ok" if rt.status == "HALTED" else "warn")
+        fl = None
+        if rt.flatten_task is not None:
+            fl = await rt.flatten_task
+            await tl.step(RECOVERY, "Halt and flatten", f"{len(fl['cancelled'])} working order(s) cancelled, "
+                          f"{len(fl['close_orders'])} reduce-only close order(s); position {fl['position']:+} after {fl['elapsed_s']}s",
+                          "ok" if fl["flat"] else "error", {"flatten": {k: v for k, v in fl.items() if k != "position"}})
+        others = [f"{r.name} {r.status}" for r in self.sys.strategies.runtimes.values() if r.id != sid]
+        flat = self.sys.positions.get(sid, rt.symbol).quantity == 0
+        final = (f"{rt.name} {rt.status}, position {self.sys.positions.get(sid, rt.symbol).quantity:+}"
+                 + ("" if fl is None else f", flattened in {fl['elapsed_s']}s") + "; other strategies unaffected: "
+                 + (", ".join(others) or "none"))
+        ok = rt.status == "HALTED" and flat
+        await tl.step(FINAL, "RUNAWAY CONTAINED - HALTED AND FLAT" if ok else "CHECK STRATEGY", final, "ok" if ok else "warn")
         return final
 
     async def _s_high_latency(self, tl: Timeline, p: dict) -> str:
@@ -465,7 +486,7 @@ class FaultSimulator:
             rt = self.sys.strategies.runtimes[sid]
             bo = await self.sys.broker.adapter.place_order(PlaceOrderRequest(key, rt.symbol, o1db.side, o1db.quantity, "MARKET"))
             await tl.step(RESPONSE, "Broker-level resend returned the SAME broker order",
-                          f"{bo.broker_order_id} ({bo.status}) - venue is idempotent on client order id", "ok")
+                          f"{bo.broker_order_id} ({bo.status}) - the broker adapter is idempotent on the client order id", "ok")
         b_n = sum(1 for b in await self.sys.broker.adapter.get_orders() if b.client_order_id == key)
         async with self.sys.db.session() as s:
             i_n = len((await s.execute(select(Order.id).where(Order.client_order_id == key))).all())
@@ -499,11 +520,12 @@ class FaultSimulator:
     async def chaos(self, actor: str) -> dict:
         group = new_id()
         results = []
-        await self.sys.bus.publish(Event("chaos.started", "FaultSimulator", payload={"run_group": group,
-                                                                                     "sequence": self.CHAOS_SEQUENCE}))
-        await self.sys.audit.record("CHAOS_MODE_STARTED", f"automated chaos mode started by {actor}: {', '.join(self.CHAOS_SEQUENCE)}",
+        plan = self._plan()
+        seq = [sc for sc, _ in plan]
+        await self.sys.bus.publish(Event("chaos.started", "FaultSimulator", payload={"run_group": group, "sequence": seq}))
+        await self.sys.audit.record("CHAOS_MODE_STARTED", f"automated chaos mode started by {actor}: {', '.join(seq)}",
                                     source="FaultSimulator", severity="WARN", actor=actor)
-        for sc, sid in self.CHAOS_PLAN:
+        for sc, sid in plan:
             r = await self.run(sc, actor, {"strategy_id": sid}, run_group=group)
             results.append({"scenario": sc, "status": r["status"], "outcome": r["outcome"], "run_id": r["run_id"]})
             await self.sys.bus.publish(Event("chaos.progress", "FaultSimulator", payload={"run_group": group, "results": results}))

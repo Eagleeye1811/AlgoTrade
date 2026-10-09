@@ -1,8 +1,9 @@
 """BrokerAdapter interface. The trading engine depends only on this interface.
 
     BrokerAdapter
-    ├── PaperBrokerSimulator   (used: no verified 021 API documentation/credentials are available)
-    └── (021Adapter)           intentionally NOT implemented - no documented API/credentials were provided.
+    ├── PaperBrokerSimulator   (in use until the 021 adapter is wired in)
+    └── 021 adapter            pending: transport done (brokers/o21_client.py); response formats to be confirmed
+                               against the sandbox before the adapter is written
 """
 from __future__ import annotations
 

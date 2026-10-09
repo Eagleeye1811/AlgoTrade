@@ -34,6 +34,7 @@ class PnLEngine:
     def __init__(self, system: "TradingSystem"):
         self.sys = system
         self.realized_today = ZERO
+        self.realized_today_by: dict[str, Decimal] = {}
         self.orders_today = 0
         self._task: asyncio.Task | None = None
         self.last: dict[str, Any] | None = None
@@ -41,8 +42,10 @@ class PnLEngine:
     async def refresh_daily(self) -> None:
         start = ist_day_start()
         async with self.sys.db.session() as s:
-            self.realized_today = (await s.execute(select(func.coalesce(func.sum(PositionEvent.realized_delta), 0))
-                                                   .where(PositionEvent.created_at >= start))).scalar_one()
+            rows = (await s.execute(select(PositionEvent.strategy_id, func.coalesce(func.sum(PositionEvent.realized_delta), 0))
+                                    .where(PositionEvent.created_at >= start).group_by(PositionEvent.strategy_id))).all()
+            self.realized_today_by = {sid: Decimal(v) for sid, v in rows}
+            self.realized_today = sum(self.realized_today_by.values(), ZERO)
             self.orders_today = (await s.execute(select(func.count()).select_from(Order)
                                                  .where(Order.created_at >= start))).scalar_one()
 
@@ -85,8 +88,9 @@ class PnLEngine:
             strategies[o.strategy_id]["reserved_margin"] += o.remaining * ref * rate
         tot = {k: sum((s[k] for s in strategies.values()), ZERO)
                for k in ("realized", "unrealized", "exposure", "margin_used", "reserved_margin")}
-        for s in strategies.values():
+        for sid, s in strategies.items():
             s["total_pnl"] = s["realized"] + s["unrealized"]
+            s["today_pnl"] = q(self.realized_today_by.get(sid, ZERO) + s["unrealized"])
             s["available_margin"] = s["allocation"] - s["margin_used"] - s["reserved_margin"]
             s["utilization_pct"] = float((s["margin_used"] + s["reserved_margin"]) / s["allocation"] * 100) if s["allocation"] else 0.0
             for k in ("allocation", "realized", "unrealized", "exposure", "margin_used", "reserved_margin", "total_pnl", "available_margin"):

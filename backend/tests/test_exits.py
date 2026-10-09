@@ -93,27 +93,3 @@ async def test_exit_params_validated(trading):
     with pytest.raises(ValueError):
         await sys_.strategies.update_config("macd", {"stop_loss_pct": 25}, None, None, None, "test")
 
-
-# ---------------------------------------------------------------- multi-symbol strategies
-async def test_strategy_trades_every_symbol(trading):
-    sys_ = trading
-    rt = sys_.strategies.runtimes["macd"]
-    assert rt.symbols == ["RELIANCE", "INFY"]  # primary first, then the rest of the universe
-    await sys_.market.provider.push("INFY", "1500")
-    res = await sys_.strategies.handle_signal("macd", "BUY", "infy entry", origin="STRATEGY", symbol="INFY")
-    assert res["order"]["symbol"] == "INFY"
-    assert await fill_order(sys_, "INFY", "1500", res["order"]["id"])
-    assert sys_.positions.get("macd", "INFY").quantity > 0
-    assert sys_.positions.get("macd", "RELIANCE").quantity == 0
-    snap = sys_.strategies.snapshot(rt)
-    assert snap["open_positions"] == 1 and {b["symbol"] for b in snap["books"]} == {"RELIANCE", "INFY"}
-
-
-async def test_entry_size_capped_by_per_symbol_budget(trading):
-    sys_ = trading
-    rt = sys_.strategies.runtimes["macd"]
-    budget = rt.allocation / len(rt.symbols)
-    pricey = (budget / 10).quantize(D(1))  # only ~10 shares fit
-    assert sys_.strategies.entry_quantity(rt, pricey) == min(rt.quantity, (budget / pricey).to_integral_value(rounding="ROUND_FLOOR"))
-    assert sys_.strategies.entry_quantity(rt, D(1)) == rt.quantity  # cheap stock: configured quantity
-    assert sys_.strategies.entry_quantity(rt, budget * 2) == 0

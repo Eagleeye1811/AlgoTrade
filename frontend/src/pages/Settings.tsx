@@ -3,7 +3,7 @@ import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useApi } from '../hooks/useEvents'
 import { api } from '../services/api'
-import { fmtINR, fmtMarketTime, fmtTime } from '../services/format'
+import { fmtINR, fmtTime } from '../services/format'
 import { Badge, ErrorText, Loading, Panel, StatusBadge } from '../components/ui'
 
 export default function Settings() {
@@ -12,7 +12,6 @@ export default function Settings() {
   const acct = useApi<any>('/account', ['trading.status', 'market.status', 'broker.status', 'pnl.update'], 3000)
   const admin = user?.role === 'ADMIN'
   const users = useApi<any[]>(admin ? '/auth/users' : null)
-  const [speed, setSpeed] = useState('')
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -54,31 +53,11 @@ export default function Settings() {
             <span className="text-muted">Source</span><span>{m.source}</span>
             <span className="text-muted">Status</span><span><StatusBadge status={m.display_status} /> <span className="text-muted">{m.detail}</span></span>
             <span className="text-muted">NSE session open now</span><span>{m.market_open ? 'yes' : 'no'}</span>
-            <span className="text-muted">Auto session switching</span>
-            <span>{m.auto_switching
-              ? <>on — LIVE 09:15–15:30 IST (Mon–Fri), REPLAY otherwise{m.override ? <span className="text-warn"> · operator override: {m.override} until session change</span> : null}</>
-              : 'off (mode pinned in backend config)'}</span>
-            {m.last_switch && <>
-              <span className="text-muted">Last switch</span>
-              <span>{m.last_switch.from} → {m.last_switch.to} ({m.last_switch.reason}); {m.last_switch.cancelled_orders.length} order(s) cancelled
-                {m.last_switch.carried_positions.length ? <span className="text-warn"> · positions now marked at {m.last_switch.to} prices: {m.last_switch.carried_positions.join(', ')}</span> : null}</span>
-            </>}
             <span className="text-muted">Symbols</span><span>{(m.symbols || []).join(', ')}</span>
-            {m.mode === 'REPLAY' && <>
-              <span className="text-muted">Replay position</span><span className="num">{m.cursor} / {m.total_minutes} min · {fmtMarketTime(m.market_time)}{m.ended ? ' · ENDED' : ''}</span>
-              <span className="text-muted">Speed</span><span className="num">{m.speed}x</span>
-            </>}
+            <span className="text-muted">Frames received</span><span className="num">{m.frames ?? '—'}</span>
             <span className="text-muted">Stale threshold</span><span className="num">{m.stale_after_s}s</span>
-            <span className="text-muted">Malformed bars dropped</span><span className="num">{m.dropped_malformed_bars}</span>
+            <span className="text-muted">Malformed frames dropped</span><span className="num">{m.dropped_malformed_bars}</span>
           </div>
-          {admin && m.mode === 'REPLAY' && (
-            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2">
-              <input className="input w-24 num" type="number" min={1} max={600} placeholder={String(m.speed)} value={speed} onChange={(e) => setSpeed(e.target.value)} />
-              <button className="btn" disabled={busy || !speed} onClick={() => act(() => api.post('/market/replay', { speed: Number(speed) }), `Replay speed set to ${speed}x`)}>Set speed</button>
-              <button className="btn" disabled={busy} onClick={() => act(() => api.post('/market/replay', { restart: true }), 'Replay restarted from the beginning')}>Restart replay</button>
-              <button className="btn" disabled={busy} onClick={() => act(async () => { const r = await api.post('/market/refresh-replay-data'); return 'Fetched: ' + Object.entries(r).map(([k, v]: any) => `${k} ${v.bars} bars`).join(', ') + ' (applies on replay restart)' }, '')}>Refresh replay data from API</button>
-            </div>
-          )}
         </Panel>
       </div>
       {admin && (

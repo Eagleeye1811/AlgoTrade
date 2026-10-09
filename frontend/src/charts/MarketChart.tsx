@@ -7,7 +7,6 @@ import { useEvents } from '../hooks/useEvents'
 import { fmtNum, fmtQty } from '../services/format'
 import { StatusBadge } from '../components/ui'
 import { useSystem } from '../hooks/system'
-import { useAuth } from '../hooks/auth'
 import { IST_OFFSET, makeChart, signalMarkers, toChartTime } from './base'
 
 interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number }
@@ -52,20 +51,12 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
   const tag = useRef<HTMLDivElement>(null)
   const tagPrice = useRef<HTMLDivElement>(null)
   const tagTime = useRef<HTMLDivElement>(null)
-  // market clock: LIVE follows the wall clock; REPLAY is extrapolated from the latest tick's market time × speed
-  const clock = useRef<{ mode?: string; speed: number; status: string | null; tf: '1m' | '5m'; tickMarket: number | null; tickWall: number }>(
-    { speed: 1, status: null, tf: '1m', tickMarket: null, tickWall: 0 })
-  const { overview, reload } = useSystem()
-  const { user } = useAuth()
+  // countdown clock: the live feed follows the wall clock
+  const clock = useRef<{ status: string | null; tf: '1m' | '5m' }>({ status: null, tf: '1m' })
+  const { overview } = useSystem()
   const market = overview?.market
-  const isReplay = market?.mode === 'REPLAY'
-  clock.current.mode = market?.mode
-  clock.current.speed = isReplay ? Number(market?.speed) || 1 : 1
   clock.current.status = status
   clock.current.tf = tf
-  const setSpeed = async (speed: number) => {
-    try { await api.post('/market/replay', { speed }); reload() } catch (e: any) { setError(e.message) }
-  }
 
   useEffect(() => { if (!symbol && symbols.length) setSymbol(symbols[0]) }, [symbols, symbol])
 
@@ -120,9 +111,6 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
     let left: number | null = null
     if (k.status === 'LIVE') {
       left = last.time + TF_SECONDS[k.tf] - Date.now() / 1000
-    } else if (k.status === 'REPLAY' && k.tickMarket !== null) {
-      const marketNow = k.tickMarket + ((Date.now() - k.tickWall) / 1000) * k.speed
-      left = (last.time + TF_SECONDS[k.tf] - marketNow) / k.speed
     }
     const up = last.close >= last.open
     el.style.display = 'block'
@@ -152,7 +140,8 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
       if (last) {
         setLtp(last.close)
         const day = istDay(last.time)
-        setSessionOpen(candles.find((c) => istDay(c.time) === day)?.open ?? null)
+        // exchange's session open (021) when known; else the first candle of the day we built
+        setSessionOpen(d.session?.open != null ? Number(d.session.open) : candles.find((c) => istDay(c.time) === day)?.open ?? null)
       } else { setLtp(null); setSessionOpen(null) }
       showLast(last)
       cs.current?.setMarkers(signalMarkers(d.signals, firstTime.current, true))
@@ -179,10 +168,7 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
     setLtp(c.close)
     if (!hovering.current) showLast(c)
   })
-  useEvents(['market.tick'], (e) => {
-    if (e.payload?.market_ts) { clock.current.tickMarket = Date.parse(e.payload.market_ts) / 1000; clock.current.tickWall = Date.now() }
-    if (e.symbol === symbol) setLtp(e.payload.price)
-  })
+  useEvents(['market.tick'], (e) => { if (e.symbol === symbol) setLtp(e.payload.price) })
   useEvents(['market.status'], (e) => setStatus(e.payload.display_status))
   const refreshMarkers = useRef<number | null>(null)
   useEvents(['strategy.signal'], (e) => {
@@ -262,24 +248,7 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
 
       {/* footer: feed details */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-4 py-1.5 text-[11px] text-muted">
-        {isReplay && (
-          <span className="flex items-center gap-1">
-            {user?.role === 'ADMIN' ? (
-              <select className="input py-0.5 text-[11px]" value={market.speed} onChange={(e) => setSpeed(Number(e.target.value))}
-                title="Replay speed (system-wide)">
-                {[1, 5, 10, 30, 60].map((x) => <option key={x} value={x}>{x === 1 ? '1x real-time' : `${x}x`}</option>)}
-              </select>
-            ) : <span className="num">{market.speed === 1 ? '1x real-time' : `${market.speed}x`}</span>}
-            <span title="Only 1-minute OHLCV is available from the data source. Completed candles equal the real NSE bars exactly; price steps inside the forming minute are interpolated between the real open/low/high/close and never leave the real range.">
-              · {market.ticks_per_bar} ticks/min · intra-minute path interpolated ⓘ
-            </span>
-          </span>
-        )}
-        {market?.mode === 'LIVE' && (
-          <span title="Yahoo's public endpoint has no streaming; the charted symbol is polled on a fast lane, the rest in rotation">
-            forming candle updates ~every {fmtNum(market.focus_poll_interval_s ?? 2.5, 1)}s · other symbols ~{Math.round(((market.symbols?.length || 1) - 1) * (market.poll_interval_s ?? 4))}s
-          </span>
-        )}
+        {market?.mode === 'LIVE' && <span title="021 market-data websocket: updates at most every 300 ms per changed instrument; candles are built from these ticks">021 live feed · updates ≤ 300 ms</span>}
         <span className="ml-auto">{count} candles · times IST · markers: strategy signals</span>
       </div>
     </div>
