@@ -89,6 +89,8 @@ async def candles(symbol: str, timeframe: str = Query("1m", pattern="^(1m|5m)$")
         # session values from the exchange (021 full packet): the real 09:15 open, not our first candle
         "session": {"open": sys.market.day(symbol).open, "prev_close": sys.market.day(symbol).prev_close},
         "candles": [b.to_dict() for b in bars],
+        # after hours: replay of the recorded 021 session (or the sandbox's time-frozen stream) since this time
+        "after_hours": sys.market.after_hours_info(symbol),
         "signals": [{"time": int(x.candle_time.timestamp()), "strategy_id": x.strategy_id, "signal": x.signal,
                      "action": x.action, "price": x.price, "reason": x.reason} for x in sigs if x.candle_time],
         "fills": [{"strategy_id": f.strategy_id, "side": f.side, "quantity": f.quantity, "price": f.price,

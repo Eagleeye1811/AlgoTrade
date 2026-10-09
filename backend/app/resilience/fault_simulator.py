@@ -133,8 +133,13 @@ class FaultSimulator:
         return "BUY" if pos <= 0 else "SELL"
 
     async def _test_order(self, sid: str, qty: Decimal, reason: str, key: str | None = None, corr: str | None = None,
-                          side: str | None = None) -> dict:
+                          side: str | None = None, fit: bool = True) -> dict:
         side = side or self._test_side(sid, qty)
+        if fit:  # stay within the strategy's max position, so the fault (not the Risk Firewall) is what gets tested
+            pos = self._pos(sid)
+            room = self.sys.limits.s(sid, "max_position") - (pos if side == "BUY" else -pos)
+            if room >= 1:
+                qty = min(qty, room)
         return await self.sys.strategies.handle_signal(sid, side, f"FAULT LAB test order: {reason}", {"fault_lab": True},
                                                        origin="FAULT_LAB", quantity=qty, idempotency_key=key,
                                                        correlation_id=corr)
@@ -218,7 +223,7 @@ class FaultSimulator:
         await self._require_trading(tl, sid)
         faults = self.sys.broker.adapter.faults
         faults.network_down_until = time.time() + 8
-        await tl.step(INJECT, "Broker API outage injected", "paper broker refuses all connections for 8 seconds", "error")
+        await tl.step(INJECT, "Broker API outage injected", "broker API refuses all connections for 8 seconds", "error")
         res = await self._test_order(sid, Decimal(10), "order during broker outage", corr=tl.corr)
         o = await self._reached_broker(tl, res)
         evs = await self._order_events(o["id"]) if o.get("id") else []
@@ -320,7 +325,8 @@ class FaultSimulator:
         qty = mx + Decimal(100)
         await tl.step(INJECT, "Oversized order", f"strategy asks for {qty:,.0f} shares; max position is {mx:,.0f}", "error")
         n_before = len(await self.sys.broker.adapter.get_orders())
-        res = await self._test_order(sid, qty, "oversized order", corr=tl.corr, side="BUY" if self._pos(sid) >= 0 else "SELL")
+        res = await self._test_order(sid, qty, "oversized order", corr=tl.corr, side="BUY" if self._pos(sid) >= 0 else "SELL",
+                                     fit=False)
         risk = res.get("risk") or {}
         failed = [c for c in risk.get("checks", []) if c["result"] == "FAIL"]
         for c in failed:

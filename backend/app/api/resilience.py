@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
-
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -65,7 +63,7 @@ async def broker_state(_: User = Depends(current_user), sys: TradingSystem = Dep
         raise HTTPException(503, f"broker unreachable: {e}")
     return {"account": acct.__dict__, "positions": [p.__dict__ for p in pos],
             "orders": [o.to_dict() for o in orders[-50:]], "internal_net": sys.positions.net_by_symbol(),
-            "faults": a.faults.to_dict() if hasattr(a.faults, "to_dict") else dataclasses.asdict(a.faults), "gateway": sys.broker.info()}
+            "faults": a.faults.to_dict(), "gateway": sys.broker.info()}
 
 
 # ------------------------------------------------------------------ health / recovery

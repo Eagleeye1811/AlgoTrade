@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # hours, when the sandbox keeps streaming a time-frozen snapshot), those packets are used, stamped with their
     # receive time. 0 disables the fallback.
     o21_sandbox_stream_after_s: float = 20.0
+    # After hours (outside Mon-Fri 09:15-15:30 IST) replay the last recorded 021 session in real time instead of the
+    # sandbox stream: each 1m candle as 4 ticks `replay_step_s` apart (15 s = one candle per minute).
+    after_hours_replay: bool = True
+    replay_step_s: float = 15.0
     stale_after_s_manual: float = 6.0
 
     # Account: 021 gives ₹10,00,000 virtual funds, topped up every trading day

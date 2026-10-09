@@ -36,5 +36,6 @@ class TimeEntryStrategy(Strategy):
         if self.enforce_hours and (not (ENTRY_AT <= now_ist.time() < EXIT_AT) or now_ist.weekday() >= 5):
             return None
         side = BUY if self.params["direction"] == 1 else SELL
-        return StrategySignal(side, f"time entry at {now_ist:%H:%M:%S} IST (scheduled {ENTRY_AT:%H:%M})",
+        when = f"scheduled {ENTRY_AT:%H:%M}" if self.enforce_hours else "session hours not enforced: enters when it starts"
+        return StrategySignal(side, f"time entry at {now_ist:%H:%M:%S} IST ({when})",
                               {"scheduled_entry": f"{ENTRY_AT:%H:%M}", "scheduled_exit": f"{EXIT_AT:%H:%M}"})

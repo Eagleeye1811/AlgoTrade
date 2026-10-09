@@ -314,3 +314,24 @@ async def test_adopt_baseline_acknowledges_external_trades_only_when_flat(tradin
     await asyncio.sleep(0.3)
     assert (await sys_.reconciler.run("TEST"))["status"] == "MISMATCH_UNRESOLVED"
     assert "reconciliation" in sys_.controller.blocks
+
+
+async def test_fault_lab_test_orders_fit_the_strategy_max_position(trading):
+    sys_ = trading
+    await sys_.limits.set("STRATEGY", "macd", "max_position", D(5), None)
+    await sys_.market.provider.push("RELIANCE", "1000")
+    res = await sys_.faults._test_order("macd", D(20), "sizing check")
+    assert res["order"]["quantity"] == 5 and res["order"]["status"] != "REJECTED"
+    for px in ("1000.5", "1001", "1000.5"):
+        await sys_.market.provider.push("RELIANCE", px)
+    assert await wait_for(lambda: not any(o.strategy_id == "macd" for o in sys_.orders.open_orders.values()))
+    over = await sys_.faults._test_order("macd", D(30), "oversized on purpose", fit=False, side="SELL")
+    assert over["order"]["status"] == "REJECTED" and over["order"]["reject_rule"] == "MAX_POSITION"
+
+
+async def test_demo_reset_keeps_unsubscribed_strategies_stopped(trading):
+    sys_ = trading
+    await sys_.strategies.unsubscribe("breakout", "test")
+    await sys_.demo.reset("admin")
+    assert "breakout" not in sys_.strategies.runtimes
+    assert {"ema_trend", "rsi_ema", "macd"} <= set(sys_.strategies.runtimes)
