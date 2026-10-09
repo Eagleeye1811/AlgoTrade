@@ -5,6 +5,7 @@ import { useApi } from '../hooks/useEvents'
 import { api } from '../services/api'
 import { fmtNum, fmtTime } from '../services/format'
 import RiskChecks from '../components/RiskChecks'
+import RiskAdvisor from '../components/RiskAdvisor'
 import { Empty, ErrorText, Loading, Meter, Panel, StatusBadge } from '../components/ui'
 
 export default function Risk() {
@@ -20,6 +21,7 @@ export default function Risk() {
     <div className="space-y-3">
       <div className="flex items-center gap-3"><h1 className="text-base font-semibold">Risk Firewall &amp; Virtual Margin</h1>
         <span className="text-xs text-muted num">{d.stats.approved} approved · {d.stats.rejected} rejected (since start)</span></div>
+      <RiskAdvisor currentLimits={d.limits} isAdmin={user?.role === 'ADMIN'} onLimitsApplied={risk.reload} />
       <div className="grid gap-3 lg:grid-cols-2">
         <Panel title="Portfolio utilization" bodyClass="p-3 space-y-3">{d.portfolio.map((m: any) => <Meter key={m.label} m={m} />)}</Panel>
         <Panel title="Slippage / latency guard (rule-based)" bodyClass="p-3 text-xs space-y-2">

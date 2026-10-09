@@ -151,3 +151,21 @@ def test_order_intent_rejects_fractional_quantity():
     with pytest.raises(ValueError):
         OrderIntent("macd", "X", "BUY", D("1.5"))
     assert OrderIntent("macd", "X", "BUY", D("600.0000")).quantity == D(600)
+
+
+def test_risk_recommender():
+    from app.engine.risk_recommender import calculate_risk_recommendations
+
+    # Vedant / Young Aggressive Profile
+    r_young = calculate_risk_recommendations(age=21, monthly_income=0, risk_appetite="AGGRESSIVE", capital=1000000)
+    assert r_young["risk_score"] >= 80
+    assert r_young["global_limits"]["max_daily_loss"] == 20000
+    assert r_young["global_limits"]["max_gross_exposure"] == 500000
+    assert "time_entry" in r_young["strategies"]
+
+    # Retiree / Senior Conservative Profile
+    r_senior = calculate_risk_recommendations(age=60, monthly_income=40000, risk_appetite="CONSERVATIVE", capital=1000000)
+    assert r_senior["risk_score"] <= 40
+    assert r_senior["global_limits"]["max_daily_loss"] <= 10000
+    assert r_senior["global_limits"]["max_gross_exposure"] <= 300000
+

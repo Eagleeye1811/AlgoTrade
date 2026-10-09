@@ -98,3 +98,74 @@ async def set_limit(body: LimitIn, user: User = Depends(require_admin), sys: Tra
     await sys.audit.record("RISK_LIMIT_CHANGED", f"{body.scope}{'/' + sid if sid else ''} {body.name}: {old} -> {body.value}",
                            source="RiskFirewall", actor=actor(user), strategy_id=sid)
     return sys.limits.describe()
+
+
+from app.engine.risk_recommender import calculate_risk_recommendations
+
+
+@router.get("/recommendations")
+async def get_recommendations(
+    age: int = Query(21, ge=18, le=100),
+    income: Decimal = Query(Decimal(0), ge=0),
+    risk_appetite: str = Query("AGGRESSIVE"),
+    capital: Decimal | None = Query(None, ge=0),
+    _: User = Depends(current_user),
+    sys: TradingSystem = Depends(get_system),
+):
+    cap = capital or (sys.account.starting_capital if sys.account else Decimal(1000000))
+    sids = list(sys.strategies.runtimes.keys())
+    return calculate_risk_recommendations(
+        age=age,
+        monthly_income=income,
+        risk_appetite=risk_appetite,
+        capital=cap,
+        strategy_ids=sids,
+    )
+
+
+class ApplyRecommendationIn(BaseModel):
+    age: int = Field(21, ge=18, le=100)
+    income: Decimal = Field(Decimal(0), ge=0)
+    risk_appetite: str = Field("AGGRESSIVE")
+    apply_allocations: bool = Field(False)
+
+
+@router.post("/apply-recommendations")
+async def apply_recommendations(
+    body: ApplyRecommendationIn,
+    user: User = Depends(require_admin),
+    sys: TradingSystem = Depends(get_system),
+):
+    cap = sys.account.starting_capital if sys.account else Decimal(1000000)
+    sids = list(sys.strategies.runtimes.keys())
+    recs = calculate_risk_recommendations(
+        age=body.age,
+        monthly_income=body.income,
+        risk_appetite=body.risk_appetite,
+        capital=cap,
+        strategy_ids=sids,
+    )
+    gl = recs["global_limits"]
+    await sys.limits.set("GLOBAL", None, "max_daily_loss", Decimal(str(gl["max_daily_loss"])), user.id)
+    await sys.limits.set("GLOBAL", None, "max_gross_exposure", Decimal(str(gl["max_gross_exposure"])), user.id)
+    await sys.limits.set("GLOBAL", None, "max_orders_per_min", Decimal(str(gl["max_orders_per_min"])), user.id)
+
+    for sid, st in recs["strategies"].items():
+        if sid in sys.strategies.runtimes:
+            await sys.limits.set("STRATEGY", sid, "max_daily_loss", Decimal(str(st["max_daily_loss"])), user.id)
+            await sys.limits.set("STRATEGY", sid, "max_position", Decimal(str(st["max_position"])), user.id)
+            await sys.limits.set("STRATEGY", sid, "max_orders_per_min", Decimal(str(st["max_orders_per_min"])), user.id)
+            if body.apply_allocations:
+                try:
+                    await sys.strategies.set_allocation(sid, Decimal(str(st["allocation"])), user.id)
+                except Exception:
+                    pass
+
+    await sys.audit.record(
+        "RISK_RECOMMENDATIONS_APPLIED",
+        f"Applied AI Risk Profile ({recs['risk_tier']}, Score {recs['risk_score']}) for Age {body.age}",
+        source="RiskRecommender",
+        actor=actor(user),
+    )
+    return {"status": "APPLIED", "recommendations": recs, "limits": sys.limits.describe()}
+
