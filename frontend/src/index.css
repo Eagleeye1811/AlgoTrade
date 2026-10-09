@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root { height: 100%; }
+body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 13px; }
+.num { font-variant-numeric: tabular-nums; font-family: "JetBrains Mono", ui-monospace, monospace; }
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th { text-align: left; font-weight: 500; color: #7d8a9c; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid #1f2a37; white-space: nowrap; }
+.tbl td { padding: 5px 8px; border-bottom: 1px solid #161e29; white-space: nowrap; }
+.tbl tr.clickable:hover td { background: #141b25; cursor: pointer; }
+.btn { display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; padding: 5px 10px; font-weight: 500; font-size: 12px; border: 1px solid #1f2a37; background: #141b25; color: #d6dde6; }
+.btn:hover:not(:disabled) { background: #1a2330; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn-primary { background: #1d4ed8; border-color: #2563eb; color: white; }
+.btn-primary:hover:not(:disabled) { background: #2563eb; }
+.btn-green { background: #15803d; border-color: #16a34a; color: white; }
+.btn-green:hover:not(:disabled) { background: #16a34a; }
+.btn-danger { background: #b91c1c; border-color: #dc2626; color: white; }
+.btn-danger:hover:not(:disabled) { background: #dc2626; }
+.input { background: #0a0e14; border: 1px solid #1f2a37; border-radius: 6px; padding: 5px 8px; color: #d6dde6; font-size: 12px; }
+.input:focus { outline: none; border-color: #3b82f6; }
+.panel { background: #0f141c; border: 1px solid #1f2a37; border-radius: 8px; }
+.panel-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #1f2a37; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #7d8a9c; font-weight: 600; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #1f2a37; border-radius: 4px; }
