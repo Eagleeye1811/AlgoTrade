@@ -57,7 +57,7 @@ class TradingSystem:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.db = Database(settings.database_url)
-        self.redis = RedisClient(settings.redis_url)
+        self.redis = RedisClient(settings.redis_url, settings.redis_namespace)
         self.bus = EventBus()
         self.audit = Audit(self.db, self.bus)
         self.state = StateStore(self.db)

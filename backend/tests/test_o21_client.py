@@ -88,3 +88,23 @@ async def test_missing_credentials():
     c = O21Client("http://021/v1", "", "", transport=httpx.MockTransport(lambda r: ok(None)))
     with pytest.raises(BrokerUnavailable, match="credentials"):
         await c.get("/orders")
+
+
+async def test_survives_a_stray_login_elsewhere(monkeypatch):
+    """Another 021 login revokes our token twice in a row; the client re-logs in (with backoff) instead of failing."""
+    import app.brokers.o21_client as oc
+    monkeypatch.setattr(oc, "RELOGIN_BACKOFF_S", 0)
+    s = Server({"GET /orders": [httpx.Response(401), httpx.Response(401), ok([{"orderId": "1"}])]})
+    c = client(s)
+    assert await c.get("/orders") == [{"orderId": "1"}]
+    assert s.logins == 3
+
+
+async def test_persistent_revocation_names_the_session_conflict(monkeypatch):
+    import app.brokers.o21_client as oc
+    monkeypatch.setattr(oc, "RELOGIN_BACKOFF_S", 0)
+    s = Server({"GET /orders": [httpx.Response(401)]})
+    c = client(s)
+    with pytest.raises(BrokerUnavailable, match="another session is logging in to this 021 account"):
+        await c.get("/orders")
+    assert c.session_conflict

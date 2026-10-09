@@ -49,7 +49,7 @@ def _truncate():
 def make_settings(**over) -> Settings:
     base = dict(database_url=TEST_DB, redis_url=TEST_REDIS, market_data_mode="manual", broker_mode="paper", symbols="RELIANCE,INFY,TCS",
                 default_strategies="ema_trend,rsi_ema,macd,breakout",
-                jwt_secret="test-secret", broker_base_latency_ms=1, broker_jitter_ms=1, broker_timeout_s=1.0,
+                jwt_secret="test-secret", redis_namespace="algotrade_test", broker_base_latency_ms=1, broker_jitter_ms=1, broker_timeout_s=1.0,
                 stale_after_s_manual=3.0, reconcile_interval_s=3600, enforce_market_hours=True, broker_max_participation=Decimal("1"))
     base.update(over)
     return Settings(**base)

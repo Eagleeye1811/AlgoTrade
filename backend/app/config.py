@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     env: str = "dev"
     database_url: str = "postgresql+asyncpg://localhost:5432/algotrade"
     redis_url: str = "redis://localhost:6379/0"
+    # prefix for keys AND pub/sub channels; pub/sub ignores the Redis database number, so a second instance
+    # (e.g. the test suite) must use its own namespace or its live events reach this instance's browsers
+    redis_namespace: str = "algotrade"
 
     # Auth
     jwt_secret: str = "change-me-in-.env"

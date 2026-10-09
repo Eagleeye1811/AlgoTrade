@@ -35,6 +35,11 @@ from app.brokers.base import BrokerRejected, BrokerTimeout, BrokerUnavailable
 log = logging.getLogger("algotrade.o21")
 
 
+MAX_RELOGINS = 3                 # fresh logins per request before 021 counts as unavailable
+RELOGIN_BACKOFF_S = 0.75
+SESSION_CONFLICT_WINDOW_S = 300  # >= SESSION_CONFLICT_LOGINS logins in this window = someone else keeps logging in
+SESSION_CONFLICT_LOGINS = 3
+
 class RateLimiter:
     def __init__(self, rate_per_s: float, burst: int):
         self.rate, self.capacity = rate_per_s, float(burst)
@@ -73,6 +78,7 @@ class O21Client:
         self.token: str | None = None
         self.token_expires_at: str | None = None
         self._login_lock = asyncio.Lock()
+        self._login_times: list[float] = []  # monotonic times of recent logins (session-conflict detection)
         self.stats = {"requests": 0, "retries": 0, "relogins": 0, "rate_limited": 0, "server_errors": 0, "timeouts": 0}
         self.last_latency_ms: float | None = None
 
@@ -94,6 +100,8 @@ class O21Client:
                 raise BrokerUnavailable(f"021 login returned no access token: {body.get('error')}")
             self.token, self.token_expires_at = data["accessToken"], data.get("expiresAt")
             self.stats["relogins"] += 1
+            now = time.monotonic()
+            self._login_times = [t for t in self._login_times if now - t < SESSION_CONFLICT_WINDOW_S] + [now]
             log.info("021 login ok, token expires %s", self.token_expires_at)
             return self.token
 
@@ -107,19 +115,33 @@ class O21Client:
         body = await self.request("GET", path, safe=True, raw=True)
         return body
 
+    @property
+    def session_conflict(self) -> bool:
+        """021 keeps revoking our token: another session (021 web app, another backend with the same credentials) is
+        logging in to this account - every login revokes the previous token."""
+        now = time.monotonic()
+        return sum(1 for t in self._login_times if now - t < SESSION_CONFLICT_WINDOW_S) >= SESSION_CONFLICT_LOGINS
+
     async def request(self, method: str, path: str, body: Any = None, params: dict | None = None, safe: bool = True,
                       raw: bool = False) -> Any:
         if self.token is None:
             await self.login()
-        relogged = False
+        relogins = 0
         while True:
             token = self.token
             try:
                 return await self._send(method, path, body, params=params, safe=safe, token=token, raw=raw)
             except _Unauthorized:
-                if relogged:
-                    raise BrokerUnavailable("021 rejected the access token after a fresh login")
-                relogged = True
+                # a stray login elsewhere revokes our token: log in again (a few times, backing off) before giving up
+                if relogins >= MAX_RELOGINS:
+                    raise BrokerUnavailable(
+                        "021 rejected the access token after a fresh login"
+                        + (" - another session is logging in to this 021 account (021 web app or another AlgoTrade "
+                           "backend with the same credentials); each login revokes the previous token. Close it."
+                           if self.session_conflict else "")) from None
+                if relogins:
+                    await asyncio.sleep(RELOGIN_BACKOFF_S * relogins)
+                relogins += 1
                 await self.login(stale_token=token)
 
     async def _send(self, method: str, path: str, body: Any = None, params: dict | None = None, *, safe: bool,

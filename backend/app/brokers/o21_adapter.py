@@ -210,6 +210,12 @@ class O21Adapter(BrokerAdapter):
 
     async def get_orders(self) -> list[BrokerOrder]:
         rows = await self._call(self.client.get("/orders")) or []
+        # after a restart the in-memory map is empty: resolve our client ids from the platform's records first, so
+        # reconciliation does not report the platform's own orders as orphans
+        for r in rows:
+            oid = str(r.get("orderId"))
+            if oid not in self.by_order:
+                await self._client_id(oid)
         return [self._to_order(r) for r in rows]
 
     async def get_order_by_client_id(self, client_order_id: str) -> BrokerOrder | None:

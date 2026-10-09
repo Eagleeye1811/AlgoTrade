@@ -27,6 +27,7 @@ services:
       ALGOTRADE_O21_USERNAME: ${ALGOTRADE_O21_USERNAME:?set ALGOTRADE_O21_USERNAME in .env}
       ALGOTRADE_O21_PASSWORD: ${ALGOTRADE_O21_PASSWORD:?set ALGOTRADE_O21_PASSWORD in .env}
       ALGOTRADE_CORS_ORIGINS: http://localhost:8080
+      ALGOTRADE_TELEGRAM_BOT_TOKEN: ${ALGOTRADE_TELEGRAM_BOT_TOKEN:-}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}

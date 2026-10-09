@@ -34,6 +34,12 @@ class RedisClient:
     def k(self, key: str) -> str:
         return f"{self.ns}:{key}"
 
+    def ch(self, channel: str) -> str:
+        # pub/sub channels are server-wide (not per logical DB), so include the DB index to keep
+        # e.g. the test suite on /15 from broadcasting into a live instance on /0
+        db = self.r.connection_pool.connection_kwargs.get("db", 0) if self.r is not None else 0
+        return f"{self.ns}:{db}:{channel}"
+
     async def connect(self) -> None:
         try:
             self.r = aioredis.from_url(self.url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
@@ -98,7 +104,7 @@ class RedisClient:
     # ---------------- pub/sub
     async def publish(self, channel: str, message: str) -> bool:
         async def op():
-            await self.r.publish(self.k(channel), message)
+            await self.r.publish(self.ch(channel), message)
             return True
 
         return await self._try(op, lambda: False)

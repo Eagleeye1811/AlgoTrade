@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("algotrade.recon")
 
+FAILED_RETRY_S = 5.0
 MATCHED, RESOLVED, UNRESOLVED, RECON_FAILED = "MATCHED", "MISMATCH_RESOLVED", "MISMATCH_UNRESOLVED", "FAILED"
 EXTERNAL_KEY = "recon_external"
 BROKER_TO_INTERNAL = {"OPEN": "ACKNOWLEDGED", "PARTIALLY_FILLED": "PARTIALLY_FILLED", "FILLED": "FILLED",
@@ -307,7 +308,11 @@ class Reconciler:
 
     async def periodic(self) -> None:
         while True:
-            await asyncio.sleep(self.sys.settings.reconcile_interval_s)
+            # after a failed run (e.g. 021 briefly unreachable) re-check soon, so a transient failure does not keep
+            # orders blocked for a whole interval
+            failed = self.status == RECON_FAILED
+            await asyncio.sleep(min(FAILED_RETRY_S, self.sys.settings.reconcile_interval_s) if failed
+                                else self.sys.settings.reconcile_interval_s)
             if self.sys.account is None:
                 continue
             await self.run("PERIODIC")

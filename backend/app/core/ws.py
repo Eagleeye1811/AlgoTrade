@@ -56,7 +56,7 @@ class WSManager:
         while True:
             try:
                 ps = self.redis.pubsub()
-                await ps.subscribe(self.redis.k(CHANNEL))
+                await ps.subscribe(self.redis.ch(CHANNEL))
                 async for msg in ps.listen():
                     if msg.get("type") != "message":
                         continue
