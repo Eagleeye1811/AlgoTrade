@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-.env"
     jwt_algorithm: str = "HS256"
     jwt_ttl_minutes: int = 12 * 60
-    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:8080"
 
     # Venue and market data
     #   broker_mode      "o21"  -> orders through the 021 developer API (POST /orders) - the runtime venue
