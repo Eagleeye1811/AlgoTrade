@@ -158,10 +158,3 @@ Automated tests run offline against real PostgreSQL and Redis:
 Every scenario injects a fault at a real component boundary — the broker adapter (outage, lost response, rejection,
 latency, lost execution report), the market feed, strategy logic or internal state — and records what the engine
 did. On 021, scenarios place real sandbox orders. *Partial fill* needs the local simulator and is disabled on 021.
-
-## Future scope (not built)
-
-- BSE, F&O (lot sizes, NRML), CNC delivery, `PUT /orders/{id}` modify, `SL` book orders, AMO.
-- NSE trading holidays (the scheduler assumes Mon–Fri).
-- Official charges table (placeholder in use).
-- Live validation against the 021 sandbox (pending credentials).
