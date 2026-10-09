@@ -7,10 +7,11 @@ import { useEvents } from '../hooks/useEvents'
 import { fmtNum, fmtQty } from '../services/format'
 import { StatusBadge } from '../components/ui'
 import { useSystem } from '../hooks/system'
-import { IST_OFFSET, makeChart, signalMarkers, toChartTime } from './base'
+import { IST_OFFSET, makeChart, SignalLike, strategyTag, toChartTime, tradeMarkers } from './base'
 
 interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number }
 interface Legend { time: number; open: number; high: number; low: number; close: number; volume: number | null }
+interface Sig extends SignalLike { reason?: string }
 
 const UP = '#22c55e'
 const DOWN = '#ef4444'
@@ -46,6 +47,7 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
   const lastTime = useRef<number>(0)
   const firstTime = useRef<number | null>(null)
   const lastCandle = useRef<Candle | null>(null)
+  const signals = useRef<Sig[]>([])
   const hovering = useRef(false)
   // last-price tag on the price scale: price + time left in the forming candle (like TradingView)
   const tag = useRef<HTMLDivElement>(null)
@@ -126,13 +128,16 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
 
   const showLast = (c: Candle | null) => { if (c) setLegend({ ...c }) }
 
+  const candleData = (c: Candle) => ({ time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close })
+  const volData = (c: Candle) => ({ time: toChartTime(c.time) as Time, value: c.volume, color: volColor(c) })
+
   const load = async (sym: string, timeframe: string, keepView = false) => {
     try {
       const d = await api.get(`/market/candles/${sym}?timeframe=${timeframe}&limit=400`)
       const candles: Candle[] = d.candles
       setError(null); setStatus(d.status); setCount(candles.length)
-      cs.current?.setData(candles.map((c) => ({ time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close })))
-      vs.current?.setData(candles.map((c) => ({ time: toChartTime(c.time) as Time, value: c.volume, color: volColor(c) })))
+      cs.current?.setData(candles.map(candleData))
+      vs.current?.setData(candles.map(volData))
       const last = candles.length ? candles[candles.length - 1] : null
       lastTime.current = last ? last.time : 0
       firstTime.current = candles.length ? candles[0].time : null
@@ -144,7 +149,8 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
         setSessionOpen(d.session?.open != null ? Number(d.session.open) : candles.find((c) => istDay(c.time) === day)?.open ?? null)
       } else { setLtp(null); setSessionOpen(null) }
       showLast(last)
-      cs.current?.setMarkers(signalMarkers(d.signals, firstTime.current, true))
+      signals.current = d.signals || []
+      cs.current?.setMarkers(tradeMarkers(signals.current, firstTime.current))
       if (!keepView) chart.current?.timeScale().scrollToRealTime()
     } catch (e: any) { setError(e.message) }
   }
@@ -163,8 +169,8 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
     if (lastCandle.current && istDay(c.time) !== istDay(lastCandle.current.time)) setSessionOpen(c.open)
     lastTime.current = c.time
     lastCandle.current = c
-    cs.current?.update({ time: toChartTime(c.time) as Time, open: c.open, high: c.high, low: c.low, close: c.close })
-    vs.current?.update({ time: toChartTime(c.time) as Time, value: c.volume, color: volColor(c) })
+    cs.current?.update(candleData(c))
+    vs.current?.update(volData(c))
     setLtp(c.close)
     if (!hovering.current) showLast(c)
   })
@@ -242,6 +248,15 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
             <span className="num"><span className="text-muted">L </span><span className={legendTone}>{fmtNum(legend.low)}</span></span>
             <span className="num"><span className="text-muted">C </span><span className={legendTone}>{fmtNum(legend.close)}</span></span>
             {legend.volume !== null && <span className="num"><span className="text-muted">Vol </span>{fmtQty(legend.volume)}</span>}
+            {/* this candle's strategy signals, in full (the markers only carry short tags) */}
+            {signals.current.filter((s) => s.time === legend.time).map((s, i) => {
+              const traded = s.action?.startsWith('ORDER')
+              return (
+                <span key={i} className={`basis-full ${traded ? (s.signal === 'BUY' ? 'text-pos' : 'text-neg') : 'text-muted'}`}>
+                  {strategyTag(s.strategy_id)} {s.signal} · {s.strategy_id} · {traded ? s.action!.replace('ORDER_', '').toLowerCase() : 'no trade'}
+                </span>
+              )
+            })}
           </div>
         )}
       </div>

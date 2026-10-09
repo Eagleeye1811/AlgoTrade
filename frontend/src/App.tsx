@@ -16,10 +16,11 @@ import Health from './pages/Health'
 import Faults from './pages/Faults'
 import Audit from './pages/Audit'
 import Settings from './pages/Settings'
+import Landing from './pages/Landing'
 
 function Protected({ children }: { children: ReactNode }) {
   const { user } = useAuth()
-  if (!user) return <Navigate to="/login" replace />
+  if (!user) return <Navigate to="/welcome" replace />
   return <SystemProvider>{children}</SystemProvider>
 }
 
@@ -33,6 +34,7 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/welcome" element={<PublicOnly><Landing /></PublicOnly>} />
           <Route path="/login" element={<PublicOnly><Login mode="login" /></PublicOnly>} />
           <Route path="/register" element={<PublicOnly><Login mode="register" /></PublicOnly>} />
           <Route path="/setup" element={<Protected><AccountSetup /></Protected>} />

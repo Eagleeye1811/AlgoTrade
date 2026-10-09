@@ -117,7 +117,8 @@ class DemoMode:
         async with sys.db.transaction() as s:
             await s.execute(text("TRUNCATE " + ", ".join(WIPE_TABLES) + " RESTART IDENTITY CASCADE"))
             await s.execute(text("DELETE FROM system_state WHERE key = 'kill_switch'"))
-            await s.execute(text("UPDATE strategies SET status='RUNNING', status_reason=NULL"))
+            # unsubscribed strategies stay STOPPED
+            await s.execute(text("UPDATE strategies SET status='RUNNING', status_reason=NULL WHERE status <> 'STOPPED'"))
         if sys.is_paper:
             await sys.broker.adapter.reset_account(sys.account.broker_account_id, sys.account.starting_capital)
         await sys.redis.reset_window("")
@@ -125,6 +126,13 @@ class DemoMode:
         self.steps, self.status, self.run_id = [], "IDLE", None
         await sys.controller.set_status(PAUSED, "demo reset", actor=actor)
         await sys.start_engine(trigger="DEMO_RESET")
+        if not sys.is_paper:
+            # 021 keeps the day's trades but the platform's history was just wiped (account verified flat above):
+            # acknowledge those trades as pre-reset history so reconciliation does not block trading
+            try:
+                await sys.reconciler.adopt_baseline(f"{actor} (demo reset)")
+            except ValueError as e:  # a position appeared meanwhile: leave it to reconciliation (fails closed)
+                await sys.audit.record("DEMO_RESET_BASELINE_SKIPPED", str(e), source="DemoMode", severity="WARN", actor=actor)
         await sys.audit.record("DEMO_RESET", f"demo reset by {actor}: trading history wiped",
                                source="DemoMode", severity="WARN", actor=actor)
         await self._publish()

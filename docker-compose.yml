@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: algotrade
       POSTGRES_USER: algotrade
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-algotrade}
+    ports: ["5433:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U algotrade -d algotrade"]
@@ -12,6 +13,7 @@ services:
       retries: 20
   redis:
     image: redis:7-alpine
+    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
