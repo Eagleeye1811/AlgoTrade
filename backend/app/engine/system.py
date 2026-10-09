@@ -39,6 +39,7 @@ from app.engine.risk_firewall import RiskFirewall
 from app.engine.risk_limits import RiskLimitStore
 from app.engine.strategy_engine import StrategyEngine
 from app.market.service import MarketDataService
+from app.notifications.telegram import TelegramService
 from app.resilience.demo import DemoMode
 from app.resilience.fault_simulator import FaultSimulator
 from app.resilience.kill_switch import KillSwitch
@@ -86,6 +87,7 @@ class TradingSystem:
         self.kill_switch = KillSwitch(self)
         self.faults = FaultSimulator(self)
         self.demo = DemoMode(self)
+        self.telegram = TelegramService(self)
 
         # wiring: strategies consume closed candles and ticks; the local simulator also needs ticks to fill
         if isinstance(adapter, PaperBrokerSimulator):
@@ -122,11 +124,13 @@ class TradingSystem:
         await self.redis.connect()
         await self.ws.start()
         await self.start_engine("STARTUP")
+        await self.telegram.start()
         self._global_tasks.append(asyncio.create_task(self._health_loop(), name="health"))
 
     async def shutdown(self) -> None:
         for t in self._global_tasks:
             t.cancel()
+        await self.telegram.stop()
         await self.stop_engine()
         await self.market.close()
         await self.o21.close()

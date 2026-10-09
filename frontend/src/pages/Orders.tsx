@@ -4,44 +4,86 @@ import { useApi } from '../hooks/useEvents'
 import { api } from '../services/api'
 import { fmtNum, fmtQty, fmtTime, shortId } from '../services/format'
 import OrdersTable from '../components/OrdersTable'
+import TradesSummary, { TradeList, downloadTradesCsv, useTradeFilter } from '../components/TradesSummary'
+import { Download } from 'lucide-react'
 import RiskChecks from '../components/RiskChecks'
-import { Badge, Drawer, Empty, ErrorText, JsonKV, Loading, Panel, Side, StatusBadge } from '../components/ui'
+import { Drawer, Empty, ErrorText, JsonKV, Loading, Panel, Side, StatusBadge } from '../components/ui'
 
-const STATUSES = ['', 'CREATED', 'RISK_CHECK', 'APPROVED', 'SUBMITTED', 'ACKNOWLEDGED', 'PARTIALLY_FILLED', 'FILLED', 'REJECTED', 'CANCELLED', 'TIMEOUT']
+/** Download rows as CSV (what the table currently shows). */
+function downloadCsv(name: string, rows: any[], cols: string[]) {
+  const cell = (v: any) => { const s = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s }
+  const text = [cols.join(','), ...rows.map((r) => cols.map((c) => cell(r[c])).join(','))].join('\n')
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }))
+  const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url)
+}
+const ORDER_COLS = ['created_at', 'id', 'broker_order_id', 'strategy_id', 'symbol', 'side', 'order_type', 'quantity', 'filled_quantity',
+  'avg_fill_price', 'limit_price', 'status', 'origin', 'reduce_only', 'reject_rule', 'reject_reason', 'latency_ms', 'correlation_id']
+
+// quick status filters (client-side over the latest 500 orders), with live counts
+const OPEN = ['CREATED', 'RISK_CHECK', 'APPROVED', 'SUBMITTED', 'ACKNOWLEDGED', 'TIMEOUT']
+const STATUS_FILTERS: { key: string; label: string; test: (s: string) => boolean }[] = [
+  { key: 'ALL', label: 'All', test: () => true },
+  { key: 'OPEN', label: 'Open', test: (s) => OPEN.includes(s) },
+  { key: 'FILLED', label: 'Filled', test: (s) => s === 'FILLED' },
+  { key: 'PARTIALLY_FILLED', label: 'Partially filled', test: (s) => s === 'PARTIALLY_FILLED' },
+  { key: 'REJECTED', label: 'Rejected', test: (s) => s === 'REJECTED' },
+  { key: 'CANCELLED', label: 'Cancelled', test: (s) => s === 'CANCELLED' || s === 'EXPIRED' },
+]
+const ORIGINS: Record<string, string> = { STRATEGY: 'Strategy signal', STOP_LOSS: 'Stop-loss', TAKE_PROFIT: 'Target', SQUARE_OFF: 'Square-off',
+  KILL_SWITCH: 'Kill switch', CIRCUIT_BREAKER: 'Halt & flatten', FAULT_LAB: 'Fault Lab', DEMO: 'Demo', RUNAWAY: 'Runaway (simulated)' }
 
 export default function Orders() {
-  const [tab, setTab] = useState<'orders' | 'fills'>('orders')
-  const [status, setStatus] = useState('')
+  const [tab, setTab] = useState<'orders' | 'trades'>('orders')
+  const [status, setStatus] = useState('ALL')
+  const [side, setSide] = useState('')
+  const [origin, setOrigin] = useState('')
   const [strategy, setStrategy] = useState('')
   const [sel, setSel] = useState<string | null>(null)
-  const q = new URLSearchParams({ limit: '300', ...(status ? { status } : {}), ...(strategy ? { strategy_id: strategy } : {}) })
+  const f = useTradeFilter()
+  const q = new URLSearchParams({ limit: '500', ...(strategy ? { strategy_id: strategy } : {}) })
   const orders = useApi<any[]>(`/orders?${q}`, ['order.update'], 700)
-  const fills = useApi<any[]>(tab === 'fills' ? '/fills?limit=300' : null, ['fill.received'], 700)
+  const base = (orders.data ?? []).filter((o) => (!side || o.side === side) && (!origin || o.origin === origin))
+  const shown = base.filter((o) => STATUS_FILTERS.find((x) => x.key === status)!.test(o.status))
+  const subs = useApi<any[]>('/strategies', ['strategy.update', 'strategy.status'])
+  const stamp = new Date(Date.now() + 19800000).toISOString().slice(0, 16).replace(/[-:T]/g, '')
+  const csv = () => tab === 'orders' ? downloadCsv(`orders-${status.toLowerCase()}-${stamp}.csv`, shown, ORDER_COLS)
+    : downloadTradesCsv(f)
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="mr-3 text-base font-semibold">Orders &amp; Execution</h1>
-        {(['orders', 'fills'] as const).map((t) => <button key={t} className={`btn ${tab === t ? 'btn-primary' : ''}`} onClick={() => setTab(t)}>{t === 'orders' ? 'Orders' : 'Fills'}</button>)}
+      <TradesSummary f={f} title="Orders, Trades & P&L" />
+      <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+        {(['orders', 'trades'] as const).map((t) => <button key={t} className={`btn ${tab === t ? 'btn-primary' : ''}`} onClick={() => setTab(t)}>
+          {t === 'orders' ? 'Orders' : 'Trades (net of charges)'}</button>)}
         {tab === 'orders' && <>
-          <select className="input ml-auto" value={status} onChange={(e) => setStatus(e.target.value)}>{STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}</select>
-          <select className="input" value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-            <option value="">All strategies</option><option value="rsi_ema">RSI + EMA</option><option value="macd">MACD</option><option value="breakout">Breakout</option></select>
+          <select className="input ml-auto" value={strategy} onChange={(e) => setStrategy(e.target.value)}>
+            <option value="">All strategies</option>
+            {(subs.data ?? []).map((s: any) => <option key={s.id} value={s.id}>{s.name} · {s.symbol} · {s.id}</option>)}</select>
+          <select className="input" value={side} onChange={(e) => setSide(e.target.value)}>
+            <option value="">Buy &amp; sell</option><option value="BUY">Buy</option><option value="SELL">Sell</option></select>
+          <select className="input" value={origin} onChange={(e) => setOrigin(e.target.value)}>
+            <option value="">All origins</option>{Object.entries(ORIGINS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
         </>}
+        <button className={`btn ${tab !== 'orders' ? 'ml-auto' : ''}`} onClick={csv}><Download size={14} /> CSV</button>
       </div>
+      {tab === 'orders' && (
+        <div className="flex flex-wrap gap-1.5">
+          {STATUS_FILTERS.map((x) => {
+            const n = base.filter((o) => x.test(o.status)).length
+            const tone = x.key === 'REJECTED' ? 'text-neg' : x.key === 'PARTIALLY_FILLED' ? 'text-amber-300' : x.key === 'FILLED' ? 'text-pos' : ''
+            return (
+              <button key={x.key} onClick={() => setStatus(x.key)}
+                className={`rounded-full border px-3 py-1 text-xs font-medium ${status === x.key ? 'border-info bg-info/20 text-white' : 'border-line text-muted hover:text-text'}`}>
+                {x.label} <span className={`num ml-1 ${status === x.key ? '' : tone}`}>{n}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
       {tab === 'orders' ? (
-        <Panel title={`Orders (${orders.data?.length ?? 0})`}>{orders.data ? <OrdersTable orders={orders.data} onSelect={(o) => setSel(o.id)} /> : <Loading />}</Panel>
+        <Panel title={`Orders · ${STATUS_FILTERS.find((x) => x.key === status)!.label} (${shown.length})`}>
+          {orders.data ? shown.length ? <OrdersTable orders={shown} onSelect={(o) => setSel(o.id)} /> : <Empty>No orders match these filters</Empty> : <Loading />}</Panel>
       ) : (
-        <Panel title="Fills (actual executions)">
-          {!fills.data ? <Loading /> : fills.data.length === 0 ? <Empty>No fills yet</Empty> : (
-            <div className="overflow-x-auto"><table className="tbl"><thead><tr><th>Time</th><th>Fill</th><th>Order</th><th>Strategy</th><th>Symbol</th><th>Side</th><th className="text-right">Qty</th><th className="text-right">Price</th><th className="text-right">Ref price</th><th className="text-right">Slippage</th><th className="text-right">Latency</th><th>Source</th></tr></thead>
-              <tbody>{fills.data.map((f) => (
-                <tr key={f.id} className="clickable" onClick={() => setSel(f.order_id)}><td className="num text-muted">{fmtTime(f.filled_at)}</td><td className="num">{f.broker_fill_id}</td><td className="num">{shortId(f.order_id)}</td>
-                  <td>{f.strategy_id}</td><td>{f.symbol}</td><td><Side side={f.side} /></td><td className="num text-right">{fmtQty(f.quantity)}</td>
-                  <td className="num text-right">{fmtNum(f.price)}</td><td className="num text-right">{fmtNum(f.reference_price)}</td>
-                  <td className="num text-right">{fmtNum(f.slippage_bps, 1)} bps</td><td className="num text-right">{f.latency_ms} ms</td>
-                  <td>{f.source === 'RECONCILIATION' ? <Badge tone="amber">recon</Badge> : <span className="text-muted">report</span>}</td></tr>))}</tbody></table></div>
-          )}
-        </Panel>
+        <TradeList f={f} />
       )}
       <OrderDrawer id={sel} onClose={() => setSel(null)} onChanged={orders.reload} />
     </div>

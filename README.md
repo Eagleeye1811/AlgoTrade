@@ -14,7 +14,7 @@ developer sandbox (virtual ₹10,00,000 per day, simulated exchange).
 | Level | What the platform does | Where |
 |---|---|---|
 | **L1** | Users register and **subscribe** to any strategy on an NSE stock with their own quantity, allocation and risk limits. **1m and 5m candles are built from 021 ticks**; the EMA strategy uses both in its entry rule. | `api/strategies.py`, `market/candle_engine.py`, `market/providers.py` |
-| **L2** | Orders via `POST /orders`; fills tracked from REST (`/orders/{id}`, `/orders/{id}/trades`) triggered by the orders websocket plus a 2 s poll; partial fills and rejections handled; reconciliation against `GET /orders` and `GET /portfolio/positions`. **Exact trade list with net P&L after charges** (page *Trades & Net P&L*, `GET /api/trades`, CSV). | `brokers/o21_adapter.py`, `engine/order_engine.py`, `resilience/reconciliation.py`, `api/trades.py` |
+| **L2** | Orders via `POST /orders`; fills tracked from REST (`/orders/{id}`, `/orders/{id}/trades`) triggered by the orders websocket plus a 2 s poll; partial fills and rejections handled; reconciliation against `GET /orders` and `GET /portfolio/positions`. **Exact trade list with net P&L after charges** (page *Orders, Trades & P&L*: totals and per-strategy net P&L, the *Trades* tab with every fill, its charges and net; `GET /api/trades`, CSV). | `brokers/o21_adapter.py`, `engine/order_engine.py`, `resilience/reconciliation.py`, `api/trades.py` |
 | **L3** | Per-strategy **max loss for the day**, **max position**, **max orders per minute**, enforced in the Risk Firewall. **Kill switch**: SAFE MODE, cancel all, close all, 10-second deadline with the elapsed time recorded. | `engine/risk_firewall.py`, `resilience/kill_switch.py` |
 | **L4** | Several subscriptions on **one account**, each with its own position and P&L, including one long and one short in the same stock. | `engine/position_manager.py`, `engine/pnl_engine.py` |
 
@@ -152,6 +152,32 @@ Automated tests run offline against real PostgreSQL and Redis:
   end to end (09:15 entry, 15:15 square-off with order cancel, breakout target/stop with level exits, one entry per
   day), risk limits including per-strategy daily loss, partial fills, idempotency, timeout verification, outages,
   reconciliation, restart recovery, kill switch within 10 s, long and short books on the same stock, charges and net P&L.
+
+## Telegram copilot (`app/notifications/telegram.py`)
+
+Optional: set `ALGOTRADE_TELEGRAM_BOT_TOKEN` (from @BotFather) in `backend/.env`. Without it the feature reports
+"not configured" and nothing else changes. The bot uses long polling (`getUpdates`), so no public URL is needed.
+
+* **Linking:** Settings → Telegram copilot → *Connect Telegram* creates a one-time code (Redis, 10 minutes, single use)
+  and opens `t.me/<bot>?start=<code>`; the bot binds that **private** chat to the AlgoTrade user (`telegram_links`).
+  Unlinked chats and group chats get no data.
+* **Alerts** (each category can be switched off; `/mute` silences all):
+  * *trades* - one message per order when it completes (partial fills aggregated: average price and number of fills),
+    with the strategy, why it traded (signal, stop-loss, target, square-off, kill switch, halt-and-flatten, Fault Lab),
+    the strategy's position and P&L today;
+  * *rejections* - Risk Firewall / broker rejections with the rule and reason, at most one per strategy and rule per minute;
+  * *risk* - circuit-breaker halt and the halt-and-flatten result; 80% of the strategy's daily loss limit used (once a day);
+  * *system* - kill switch activated / completed (all linked users); for ADMIN users also new order blocks, trading
+    status changes, component failures and unresolved positions;
+  * *summary* - end-of-day P&L per strategy on weekdays at `ALGOTRADE_TELEGRAM_SUMMARY_AT` (15:35 IST).
+  A trader is alerted only about their own subscriptions.
+* **Commands:** `/status`, `/pnl`, `/positions`, `/strategies` (inline Pause/Resume buttons), `/pause <n|id>`,
+  `/resume <n|id>`, `/summary`, `/mute`, `/unmute`, `/unlink`, `/help`, and `/kill` (ADMIN only; a confirm button valid
+  30 s and usable once, then the same kill switch as the web app).
+* **Safety:** the web app's authorization (a trader manages only their own strategies, an ADMIN all); resume is
+  refused in SAFE MODE; every action is audited with actor `telegram:<email>` (`TELEGRAM_LINKED`, `TELEGRAM_KILL_SWITCH`,
+  `STRATEGY_STATUS_CHANGED`, ...). Outgoing messages go through one queue (one per chat per second, retry on HTTP 429);
+  the bot token is never logged. The "Telegram Bot" component on the Health page shows its state.
 
 ## Fault Lab
 

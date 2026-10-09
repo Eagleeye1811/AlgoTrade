@@ -23,7 +23,10 @@ export default function Risk() {
         <span className="text-xs text-muted num">{d.stats.approved} approved · {d.stats.rejected} rejected (since start)</span></div>
       <RiskAdvisor currentLimits={d.limits} isAdmin={user?.role === 'ADMIN'} onLimitsApplied={risk.reload} />
       <div className="grid gap-3 lg:grid-cols-2">
-        <Panel title="Portfolio utilization" bodyClass="p-3 space-y-3">{d.portfolio.map((m: any) => <Meter key={m.label} m={m} />)}</Panel>
+        <Panel title="Portfolio utilization" bodyClass="p-3 space-y-3">
+          {d.portfolio.map((m: any) => <Meter key={m.label} m={m} />)}
+          {user?.role === 'ADMIN' && <ManualLimits limits={d.limits} names={Object.fromEntries(Object.entries(d.strategies).map(([k, s]: any) => [k, s.name]))} onSaved={risk.reload} />}
+        </Panel>
         <Panel title="Slippage / latency guard (rule-based)" bodyClass="p-3 text-xs space-y-2">
           <Row label="Broker API latency" value={g.broker_latency_ms != null ? `${fmtNum(g.broker_latency_ms, 0)} ms` : 'n/a'}
             note={`protective LIMIT ≥ ${fmtNum(g.latency_warn_ms, 0)} ms · BLOCK ≥ ${fmtNum(g.latency_block_ms, 0)} ms`}
@@ -58,6 +61,62 @@ export default function Risk() {
               </Fragment>))}</tbody></table></div>
         )}
       </Panel>
+    </div>
+  )
+}
+
+/** Set the problem statement's three limits by hand (ADMIN): account max daily loss and max orders per minute,
+ *  max position size for every strategy or one of them. */
+function ManualLimits({ limits, names, onSaved }: { limits: any; names: Record<string, string>; onSaved: () => void }) {
+  const g = (n: string) => limits.global.find((x: any) => x.name === n)?.value
+  const sids = Object.keys(limits.strategy)
+  const [open, setOpen] = useState(false)
+  const [loss, setLoss] = useState('')
+  const [opm, setOpm] = useState('')
+  const [pos, setPos] = useState('')
+  const [target, setTarget] = useState('ALL')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [ok, setOk] = useState<string | null>(null)
+  const posOf = (sid: string) => limits.strategy[sid]?.find((x: any) => x.name === 'max_position')?.value
+  const start = () => {
+    setLoss(String(g('max_daily_loss') ?? '')); setOpm(String(g('max_orders_per_min') ?? ''))
+    setPos(String(posOf(target === 'ALL' ? sids[0] : target) ?? '')); setErr(null); setOk(null); setOpen(true)
+  }
+  const save = async () => {
+    setBusy(true); setErr(null); setOk(null)
+    try {
+      const put = (scope: string, name: string, value: string, strategy_id: string | null = null) =>
+        api.put('/risk/limits', { scope, strategy_id, name, value: Number(value) })
+      if (loss !== '' && Number(loss) !== Number(g('max_daily_loss'))) await put('GLOBAL', 'max_daily_loss', loss)
+      if (opm !== '' && Number(opm) !== Number(g('max_orders_per_min'))) await put('GLOBAL', 'max_orders_per_min', opm)
+      if (pos !== '') for (const sid of (target === 'ALL' ? sids : [target])) if (Number(pos) !== Number(posOf(sid))) await put('STRATEGY', 'max_position', pos, sid)
+      setOk('Limits saved - the Risk Firewall enforces them on the next order'); setOpen(false); onSaved()
+    } catch (e: any) { setErr(e.message) } finally { setBusy(false) }
+  }
+  if (!open) return (
+    <div className="flex items-center gap-2 border-t border-line pt-3">
+      <button className="btn" onClick={start}>Set limits manually</button>{ok && <span className="text-xs text-green-400">{ok}</span>}
+    </div>
+  )
+  return (
+    <div className="space-y-2 border-t border-line pt-3 text-xs">
+      <div className="grid gap-2 sm:grid-cols-3">
+        <label className="text-muted">Max daily loss (₹, account)
+          <input className="input mt-1 w-full num" type="number" min={1} step={100} value={loss} onChange={(e) => setLoss(e.target.value)} /></label>
+        <label className="text-muted">Max position size (shares)
+          <input className="input mt-1 w-full num" type="number" min={1} step={1} value={pos} onChange={(e) => setPos(e.target.value)} /></label>
+        <label className="text-muted">Max orders per minute (account)
+          <input className="input mt-1 w-full num" type="number" min={1} max={600} step={1} value={opm} onChange={(e) => setOpm(e.target.value)} /></label>
+      </div>
+      <label className="block text-muted">Max position applies to
+        <select className="input mt-1 w-full" value={target} onChange={(e) => { setTarget(e.target.value); const v = posOf(e.target.value === 'ALL' ? sids[0] : e.target.value); if (v != null) setPos(String(v)) }}>
+          <option value="ALL">All strategies ({sids.length})</option>
+          {sids.map((s) => <option key={s} value={s}>{names[s] ? `${names[s]} · ` : ''}{s}</option>)}
+        </select></label>
+      <div className="text-muted">Per-strategy max daily loss and orders per minute are set on each strategy (Strategies → Configure, or the cards below).</div>
+      <ErrorText error={err} />
+      <div className="flex gap-2"><button className="btn btn-primary" disabled={busy} onClick={save}>Save limits</button><button className="btn" onClick={() => setOpen(false)}>Cancel</button></div>
     </div>
   )
 }

@@ -5,6 +5,7 @@ import { useApi } from '../hooks/useEvents'
 import { api } from '../services/api'
 import { fmtINR, fmtTime } from '../services/format'
 import { Badge, ErrorText, Loading, Panel, StatusBadge } from '../components/ui'
+import TelegramPanel from '../components/TelegramPanel'
 
 export default function Settings() {
   const { user } = useAuth()
@@ -27,6 +28,7 @@ export default function Settings() {
       <h1 className="text-base font-semibold">Settings / Account</h1>
       <div className="rounded border border-violet-500/30 bg-violet-500/10 p-3 text-xs text-violet-200"><b>{d.execution_mode}.</b> {d.broker_note}</div>
       <ErrorText error={err} />{msg && <div className="text-xs text-green-400">{msg}</div>}
+      <TelegramPanel />
       <div className="grid gap-3 lg:grid-cols-2">
         <Panel title="Trading account" bodyClass="p-3 text-xs">
           {!a ? <div>Not configured</div> : (

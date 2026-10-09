@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     broker_slippage_bps: Decimal = Decimal("2")
     broker_timeout_s: float = 5.0  # client-side timeout for broker API calls
 
+    # Telegram bot (optional): token from @BotFather. Empty = Telegram alerts/commands disabled.
+    telegram_bot_token: str = ""
+    telegram_api_base: str = "https://api.telegram.org"
+    telegram_summary_at: str = "15:35"  # IST, weekdays: end-of-day summary to linked users
+
     # Background jobs
     reconcile_interval_s: float = 30.0
     limit_order_ttl_s: float = 60.0

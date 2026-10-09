@@ -57,6 +57,9 @@ async def build_trades(sys: TradingSystem, day: date | None, strategy_id: str | 
             "strategy": name, "symbol": f.symbol, "side": f.side, "quantity": f.quantity, "price": f.price,
             "turnover": (f.quantity * f.price).quantize(Decimal("0.01")), "order_id": str(f.order_id),
             "broker_fill_id": f.broker_fill_id, "realized_gross": gross, "charges": c, "net": gross - c["total"],
+            # execution quality (formerly the separate Fills view)
+            "reference_price": f.reference_price, "slippage_bps": f.slippage_bps, "latency_ms": f.latency_ms,
+            "source": f.source,
         })
         st = per.setdefault(f.strategy_id, {"strategy_id": f.strategy_id, "strategy": name, "trades": 0, "buy_qty": ZERO,
                                             "sell_qty": ZERO, "turnover": ZERO, "realized_gross": ZERO, "charges": ZERO,
@@ -101,11 +104,13 @@ async def trades_csv(day: str | None = Query(None, alias="date"), all_days: bool
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["time_ist", "strategy_id", "symbol", "side", "quantity", "price", "turnover", "realized_gross",
-                *COMPONENTS, "charges_total", "net", "order_id", "broker_fill_id"])
+                *COMPONENTS, "charges_total", "net", "order_id", "broker_fill_id", "reference_price", "slippage_bps",
+                "latency_ms", "source"])
     for t in d["trades"]:
         c = t["charges"]
         w.writerow([t["time"], t["strategy_id"], t["symbol"], t["side"], t["quantity"], t["price"], t["turnover"],
-                    t["realized_gross"], *(c[k] for k in COMPONENTS), c["total"], t["net"], t["order_id"], t["broker_fill_id"]])
+                    t["realized_gross"], *(c[k] for k in COMPONENTS), c["total"], t["net"], t["order_id"], t["broker_fill_id"],
+                    t["reference_price"], t["slippage_bps"], t["latency_ms"], t["source"]])
     w.writerow([])
     w.writerow(["strategy_id", "trades", "turnover", "realized_gross", "charges", "net_realized"])
     for st in d["strategies"]:

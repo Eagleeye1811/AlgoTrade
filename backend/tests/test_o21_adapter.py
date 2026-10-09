@@ -190,3 +190,17 @@ def test_faults_serialize_for_the_fault_lab_api():
     json.dumps(d)
     f.disarm()
     assert f.to_dict()["network_down_s"] == 0
+
+
+def test_trade_time_reads_the_sandbox_shifted_epoch():
+    """GET /orders/{id}/trades tradeTime came back 315,513,000 s (the 1980-epoch offset) in the future on the
+    sandbox: fills were stored as 2036. The plausible reading is used; garbage becomes the receive time."""
+    from datetime import datetime, timezone
+    from app.brokers.o21_adapter import trade_time
+    from app.brokers.o21_protocol import EPOCH_1980_IST
+    now = datetime(2026, 10, 9, 11, 58, 50, tzinfo=timezone.utc).timestamp()
+    real = datetime(2026, 10, 9, 11, 58, 42, tzinfo=timezone.utc)
+    assert trade_time(int(real.timestamp()) + EPOCH_1980_IST, now) == real   # shifted forward (seen)
+    assert trade_time(int(real.timestamp()), now) == real                     # plain Unix seconds
+    assert trade_time(int(real.timestamp()) - EPOCH_1980_IST, now) == real   # seconds since 1980
+    assert trade_time(None, now).timestamp() == now and trade_time("x", now).timestamp() == now

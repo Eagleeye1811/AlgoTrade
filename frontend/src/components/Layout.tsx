@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, AlertOctagon, BarChart3, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Receipt, Settings, ShieldCheck, Wallet } from 'lucide-react'
+import { Activity, AlertOctagon, BarChart3, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Settings, ShieldCheck, Wallet } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useWsStatus } from '../hooks/useEvents'
@@ -12,9 +12,8 @@ import { Badge, ErrorText, Modal, StatusBadge } from './ui'
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/strategies', label: 'Strategies', icon: CandlestickChart, end: true },
-  { to: '/orders', label: 'Orders & Execution', icon: ListOrdered },
-  { to: '/trades', label: 'Trades & Net P&L', icon: Receipt },
-  { to: '/positions', label: 'Positions & P&L', icon: Wallet },
+  { to: '/orders', label: 'Orders, Trades & P&L', icon: ListOrdered },
+  { to: '/positions', label: 'Positions', icon: Wallet },
   { to: '/risk', label: 'Risk', icon: ShieldCheck },
   { to: '/health', label: 'Reconciliation & Health', icon: Activity },
   { to: '/faults', label: 'Fault Simulation', icon: Bug },

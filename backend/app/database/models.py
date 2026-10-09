@@ -66,6 +66,16 @@ class UserSession(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TelegramLink(TimestampMixin, Base):
+    """A user's Telegram chat (private chat with the AlgoTrade bot): alerts go there, commands come from there."""
+    __tablename__ = "telegram_links"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    tg_username: Mapped[str | None] = mapped_column(String(64))
+    muted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    prefs: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+
+
 # --------------------------------------------------------------------------- account / system state
 class TradingAccount(TimestampMixin, Base):
     __tablename__ = "trading_accounts"

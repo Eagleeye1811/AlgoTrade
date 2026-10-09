@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import account, audit, auth, market, orders, resilience, risk, strategies, trades
+from app.api import account, audit, auth, market, orders, resilience, risk, strategies, telegram, trades
 from app.config import get_settings
 from app.core.security import ws_user
 from app.engine.system import TradingSystem
@@ -38,7 +38,7 @@ def create_app() -> FastAPI:
                   description="Fault-tolerant algorithmic trading & risk control platform (021 developer sandbox)")
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])
-    for r in (auth, account, market, strategies, orders, trades, risk, resilience, audit):
+    for r in (auth, account, market, strategies, orders, trades, risk, resilience, audit, telegram):
         app.include_router(r.router)
 
     @app.get("/api/ping")
