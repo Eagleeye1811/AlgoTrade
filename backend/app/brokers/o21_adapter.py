@@ -30,7 +30,7 @@ from app.brokers.base import (BrokerAccount, BrokerAdapter, BrokerOrder, BrokerP
                               BrokerUnavailable, ExecutionReport, OrderUpdate, PlaceOrderRequest)
 from app.brokers.o21_client import NotFound, O21Client, UncertainOrder
 from app.brokers.o21_instruments import InstrumentStore
-from app.brokers.o21_protocol import ProtocolError, parse_order_frame
+from app.brokers.o21_protocol import EPOCH_1980_IST, ProtocolError, parse_order_frame
 
 log = logging.getLogger("algotrade.o21.adapter")
 P100 = Decimal(100)
@@ -73,6 +73,19 @@ class Faults:
         return {"network_down_s": max(0.0, round(self.network_down_until - time.time(), 1)),
                 "timeout_next_place": self.timeout_next_place, "reject_next": self.reject_next,
                 "drop_reports_next": self.drop_reports_next, "extra_latency_ms": self.extra_latency_ms}
+
+
+def trade_time(v: Any, now: float | None = None) -> datetime:
+    """021 tradeTime -> UTC datetime. Seen on the sandbox: GET /orders/{id}/trades reports Unix seconds shifted
+    forward by the 1980-epoch offset (the order socket uses seconds since 1980, i.e. shifted the other way). The
+    reading that falls within the last week is used; anything implausible becomes the receive time."""
+    now = time.time() if now is None else now
+    try:
+        t = int(v)
+    except (TypeError, ValueError):
+        t = 0
+    ok = [c for c in (t, t - EPOCH_1980_IST, t + EPOCH_1980_IST) if t > 0 and now - 7 * 86400 <= c <= now + 300]
+    return datetime.fromtimestamp(min(ok, key=lambda c: abs(now - c)) if ok else now, tz=timezone.utc)
 
 
 class O21Adapter(BrokerAdapter):
@@ -284,7 +297,7 @@ class O21Adapter(BrokerAdapter):
             sym = t.get("symbol") or self.instruments.symbol_of(t.get("exchange", "NSECM"), int(t.get("token", 0))) or ""
             out.append(ExecutionReport(f"021-{t.get('tradeId')}", oid, cid or "", sym, "BUY" if q > 0 else "SELL",
                                        Decimal(abs(q)), px, px, 0,
-                                       datetime.fromtimestamp(int(t.get("tradeTime") or time.time()), tz=timezone.utc),
+                                       trade_time(t.get("tradeTime")),
                                        cum, max(total, cum)))
         return out
 

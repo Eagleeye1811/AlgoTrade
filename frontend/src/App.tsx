@@ -9,7 +9,6 @@ import Dashboard from './pages/Dashboard'
 import Strategies from './pages/Strategies'
 import StrategyDetail from './pages/StrategyDetail'
 import Orders from './pages/Orders'
-import Trades from './pages/Trades'
 import Positions from './pages/Positions'
 import Risk from './pages/Risk'
 import Health from './pages/Health'
@@ -43,7 +42,7 @@ export default function App() {
             <Route path="strategies" element={<Strategies />} />
             <Route path="strategies/:id" element={<StrategyDetail />} />
             <Route path="orders" element={<Orders />} />
-            <Route path="trades" element={<Trades />} />
+            <Route path="trades" element={<Navigate to="/orders" replace />} />
             <Route path="positions" element={<Positions />} />
             <Route path="risk" element={<Risk />} />
             <Route path="health" element={<Health />} />

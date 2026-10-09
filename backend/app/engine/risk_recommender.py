@@ -81,6 +81,14 @@ def calculate_risk_recommendations(
             f"with defensive exposure limits to safeguard wealth."
         )
 
+    # Per-strategy max position (shares) and max orders per minute, by risk tier
+    if risk_score >= 80:
+        strategy_max_position, strategy_orders_pm = 50, 10
+    elif risk_score >= 50:
+        strategy_max_position, strategy_orders_pm = 30, 8
+    else:
+        strategy_max_position, strategy_orders_pm = 15, 5
+
     # Global Limits
     max_daily_loss = (cap * loss_pct).quantize(Decimal("100"))
     max_gross_exposure = (cap * exposure_pct).quantize(Decimal("1000"))
@@ -116,16 +124,8 @@ def calculate_risk_recommendations(
         strat_loss = (strat_alloc * (loss_pct * Decimal("1.5"))).quantize(Decimal("100"))
         strat_loss = min(strat_loss, max_daily_loss)
         
-        # Position sizing based on stock price approximations (~Rs 2,000 - 3,000 per share)
-        if risk_score >= 80:
-            pos_size = 50 if "breakout" in sid or "trend" in sid else 25
-            orders_pm = 10 if "breakout" in sid or "trend" in sid else 5
-        elif risk_score >= 50:
-            pos_size = 30 if "breakout" in sid or "trend" in sid else 15
-            orders_pm = 8
-        else:
-            pos_size = 15
-            orders_pm = 5
+        # the problem statement's per-strategy limits: one size per risk tier for every strategy
+        pos_size, orders_pm = strategy_max_position, strategy_orders_pm
 
         strategy_recs[sid] = {
             "strategy_id": sid,
@@ -154,6 +154,8 @@ def calculate_risk_recommendations(
             "max_orders_per_min": orders_per_min,
             "target_margin_utilization_pct": margin_util_target,
         },
+        # the three limits the problem statement requires, as applied to every strategy
+        "strategy_limits": {"max_position": strategy_max_position, "max_orders_per_min": strategy_orders_pm},
         "safety_buffer": float(reserve_buffer),
         "strategies": strategy_recs,
     }

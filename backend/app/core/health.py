@@ -21,6 +21,7 @@ COMPONENTS = [
     ("websocket", "WebSocket"),
     ("reconciliation", "Reconciliation"),
     ("workers", "Background Workers"),
+    ("telegram", "Telegram Bot"),
 ]
 
 

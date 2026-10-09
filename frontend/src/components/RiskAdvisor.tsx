@@ -13,6 +13,13 @@ interface RiskAdvisorProps {
 export default function RiskAdvisor({ isAdmin = false, onLimitsApplied }: RiskAdvisorProps) {
   const [age, setAge] = useState<number>(21)
   const [income, setIncome] = useState<number>(0)
+  const [incomeText, setIncomeText] = useState('0')
+  // typed salary: recalculate shortly after the user stops typing
+  useEffect(() => {
+    const v = Math.max(0, Math.round(Number(incomeText) || 0))
+    const id = window.setTimeout(() => setIncome(v), 400)
+    return () => clearTimeout(id)
+  }, [incomeText])
   const [appetite, setAppetite] = useState<string>('AGGRESSIVE')
   const [recs, setRecs] = useState<any>(null)
   const [loading, setLoading] = useState(false)
@@ -41,6 +48,7 @@ export default function RiskAdvisor({ isAdmin = false, onLimitsApplied }: RiskAd
   const applyPreset = (pAge: number, pIncome: number, pAppetite: string) => {
     setAge(pAge)
     setIncome(pIncome)
+    setIncomeText(String(pIncome))
     setAppetite(pAppetite)
   }
 
@@ -136,16 +144,21 @@ export default function RiskAdvisor({ isAdmin = false, onLimitsApplied }: RiskAd
         </label>
         <label className="text-xs text-muted">
           Monthly Income / Salary (INR)
-          <select
-            className="input mt-1 w-full"
-            value={income}
-            onChange={(e) => setIncome(Number(e.target.value))}
-          >
-            <option value={0}>₹0 (Student / Sandbox Tester)</option>
-            <option value={30000}>₹30,000 / mo</option>
-            <option value={75000}>₹75,000 / mo</option>
-            <option value={150000}>₹1,50,000+ / mo</option>
-          </select>
+          <input
+            className="input mt-1 w-full num"
+            type="number"
+            min={0}
+            step={1000}
+            placeholder="e.g. 45000"
+            value={incomeText}
+            onChange={(e) => setIncomeText(e.target.value)}
+          />
+          <div className="mt-1 flex flex-wrap gap-1">
+            {[0, 30000, 75000, 150000].map((v) => (
+              <button key={v} type="button" className={`rounded border px-1.5 py-0.5 text-[10px] ${income === v ? 'border-amber-400 text-amber-200' : 'border-line text-muted hover:text-text'}`}
+                onClick={() => setIncomeText(String(v))}>{v === 0 ? '₹0 (student)' : `₹${v.toLocaleString('en-IN')}`}</button>
+            ))}
+          </div>
         </label>
         <label className="text-xs text-muted">
           Risk Tolerance Style
@@ -168,34 +181,28 @@ export default function RiskAdvisor({ isAdmin = false, onLimitsApplied }: RiskAd
             <b>💡 Financial Rationale:</b> {recs.rationale}
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-4 text-xs">
+          {/* the three limits the problem statement requires (enforced by the Risk Firewall) */}
+          <div className="grid gap-3 sm:grid-cols-3 text-xs">
             <div className="p-2.5 rounded border border-line bg-bg">
               <div className="text-muted text-[11px]">Recommended Max Daily Loss</div>
               <div className="text-base font-semibold text-amber-300 num mt-0.5">
                 {fmtINR(recs.global_limits.max_daily_loss)}
               </div>
-              <div className="text-[10px] text-muted">({recs.global_limits.max_daily_loss_pct}% of capital)</div>
+              <div className="text-[10px] text-muted">({recs.global_limits.max_daily_loss_pct}% of capital · account; per strategy below)</div>
             </div>
             <div className="p-2.5 rounded border border-line bg-bg">
-              <div className="text-muted text-[11px]">Max Gross Exposure</div>
+              <div className="text-muted text-[11px]">Max Position Size</div>
               <div className="text-base font-semibold text-text num mt-0.5">
-                {fmtINR(recs.global_limits.max_gross_exposure)}
+                {recs.strategy_limits.max_position} shares
               </div>
-              <div className="text-[10px] text-muted">({recs.global_limits.max_gross_exposure_pct}% leverage cap)</div>
+              <div className="text-[10px] text-muted">per strategy · larger orders are rejected</div>
             </div>
             <div className="p-2.5 rounded border border-line bg-bg">
-              <div className="text-muted text-[11px]">Target Margin Utilization</div>
+              <div className="text-muted text-[11px]">Max Orders per Minute</div>
               <div className="text-base font-semibold text-sky-300 num mt-0.5">
-                {recs.global_limits.target_margin_utilization_pct}%
+                {recs.strategy_limits.max_orders_per_min} / min
               </div>
-              <div className="text-[10px] text-muted">Protective buffer headroom</div>
-            </div>
-            <div className="p-2.5 rounded border border-line bg-bg">
-              <div className="text-muted text-[11px]">Unallocated Safety Buffer</div>
-              <div className="text-base font-semibold text-emerald-300 num mt-0.5">
-                {fmtINR(recs.safety_buffer)}
-              </div>
-              <div className="text-[10px] text-muted">Cash reserve held flat</div>
+              <div className="text-[10px] text-muted">per strategy · stops runaway order loops</div>
             </div>
           </div>
 

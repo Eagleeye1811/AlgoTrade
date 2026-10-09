@@ -28,6 +28,19 @@ def meter(label: str, used, limit, unit: str) -> dict:
             "level": level(u, l)}
 
 
+def _largest_position(sys: TradingSystem) -> dict:
+    """Max position size: the strategy closest to its own max position limit."""
+    best = None
+    for sid, rt in sys.strategies.runtimes.items():
+        pos, mx = abs(sys.positions.get(sid, rt.symbol).quantity), sys.limits.s(sid, "max_position")
+        r = pos / mx if mx else Decimal(0)
+        if best is None or r > best[0]:
+            best = (r, pos, mx, sid)
+    if best is None:
+        return meter("Max position size", 0, 0, "shares")
+    return meter(f"Max position size ({best[3]})", best[1], best[2], "shares")
+
+
 @router.get("")
 async def risk_overview(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
     snap = sys.pnl.compute()
@@ -37,9 +50,8 @@ async def risk_overview(_: User = Depends(current_user), sys: TradingSystem = De
     loss = -min(port["today_pnl"], Decimal(0))
     portfolio = [
         meter("Daily loss", loss, lim.g("max_daily_loss"), "INR"),
-        meter("Overall exposure", port["exposure"], lim.g("max_gross_exposure"), "INR"),
-        meter("Capital in use (margin)", port["margin_used"] + port["reserved_margin"], port["equity"], "INR"),
-        meter("Orders (last 60s)", g_orders, lim.g("max_orders_per_min"), "orders"),
+        _largest_position(sys),
+        meter("Orders per minute (last 60s)", g_orders, lim.g("max_orders_per_min"), "orders"),
     ]
     strategies = {}
     for sid, rt in sys.strategies.runtimes.items():
@@ -146,10 +158,10 @@ async def apply_recommendations(
         strategy_ids=sids,
     )
     gl = recs["global_limits"]
+    # exactly what the advisor shows: account max daily loss + per-strategy max daily loss, max position, orders/min
     await sys.limits.set("GLOBAL", None, "max_daily_loss", Decimal(str(gl["max_daily_loss"])), user.id)
-    await sys.limits.set("GLOBAL", None, "max_gross_exposure", Decimal(str(gl["max_gross_exposure"])), user.id)
-    await sys.limits.set("GLOBAL", None, "max_orders_per_min", Decimal(str(gl["max_orders_per_min"])), user.id)
 
+    skipped: list[str] = []
     for sid, st in recs["strategies"].items():
         if sid in sys.strategies.runtimes:
             await sys.limits.set("STRATEGY", sid, "max_daily_loss", Decimal(str(st["max_daily_loss"])), user.id)
@@ -157,9 +169,9 @@ async def apply_recommendations(
             await sys.limits.set("STRATEGY", sid, "max_orders_per_min", Decimal(str(st["max_orders_per_min"])), user.id)
             if body.apply_allocations:
                 try:
-                    await sys.strategies.set_allocation(sid, Decimal(str(st["allocation"])), user.id)
-                except Exception:
-                    pass
+                    await sys.strategies.update_config(sid, None, None, Decimal(str(st["allocation"])), user.id, actor(user))
+                except ValueError as e:  # e.g. the allocation would not cover the margin already in use
+                    skipped.append(f"{sid}: {e}")
 
     await sys.audit.record(
         "RISK_RECOMMENDATIONS_APPLIED",
@@ -167,5 +179,5 @@ async def apply_recommendations(
         source="RiskRecommender",
         actor=actor(user),
     )
-    return {"status": "APPLIED", "recommendations": recs, "limits": sys.limits.describe()}
+    return {"status": "APPLIED", "recommendations": recs, "limits": sys.limits.describe(), "allocation_skipped": skipped}
 
