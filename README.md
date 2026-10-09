@@ -184,3 +184,15 @@ Optional: set `ALGOTRADE_TELEGRAM_BOT_TOKEN` (from @BotFather) in `backend/.env`
 Every scenario injects a fault at a real component boundary — the broker adapter (outage, lost response, rejection,
 latency, lost execution report), the market feed, strategy logic or internal state — and records what the engine
 did. On 021, scenarios place real sandbox orders. *Partial fill* needs the local simulator and is disabled on 021.
+**Live incident console.** While a fault runs, the Fault Lab shows a running stopwatch, a phase tracker
+(Inject → Respond → Recover → Final → Autopilot), a live map of the 8 components (market data, strategy, Risk
+Firewall, order engine, 021 broker, positions, reconciliation, trading engine) coloured by the steps that touch them,
+the event stream as it happens (`fault.step` events) and, at the end, a scorecard: time to detect (first system
+response), time to recover (last recovery step), total duration, events/errors, final state and the autopilot decision.
+
+**Self-healing autopilot** (ADMIN toggle, persisted; `PUT /api/faults/autopilot`). After every fault run it verifies
+the platform: a fresh reconciliation against 021, broker reachable, market data LIVE/REPLAY, no order blocks, not in
+SAFE MODE. Only if every check passes and the fault left trading PAUSED (it was RUNNING before) does it resume trading,
+after a 5-second countdown and a re-check. It never leaves SAFE MODE and never resumes a strategy halted by the
+circuit breaker - it lists what a human must do instead. Every decision is audited (`AUTOPILOT_DECISION`) and,
+through the trading-status change, reaches ADMIN users on Telegram.

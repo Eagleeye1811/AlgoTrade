@@ -5,6 +5,8 @@ import { useApi, useEvents } from '../hooks/useEvents'
 import { api } from '../services/api'
 import { fmtTime } from '../services/format'
 import FaultTimeline from '../components/FaultTimeline'
+import IncidentConsole from '../components/IncidentConsole'
+import { Bot } from 'lucide-react'
 import { Badge, Empty, ErrorText, Loading, Modal, Panel, StatusBadge } from '../components/ui'
 
 interface LiveRun { run_id: string; scenario: string; steps: any[]; status: string; outcome?: string }
@@ -82,7 +84,13 @@ export default function Faults() {
         )}
       </Panel>
 
-      <Panel title="Inject a fault" right={<button className="btn btn-primary" disabled={busy} onClick={() => call('/faults/chaos')}>Run automated chaos mode</button>} bodyClass="p-3">
+      <Panel title="Inject a fault" right={<div className="flex items-center gap-2">
+          <button title="After every fault: reconcile with 021, check broker / market data / blocks / SAFE MODE, and resume trading only if everything passes"
+            disabled={user?.role !== 'ADMIN' || !sc.data}
+            onClick={async () => { setErr(null); try { await api.put('/faults/autopilot', { enabled: !sc.data?.autopilot }); sc.reload() } catch (e: any) { setErr(e.message) } }}
+            className={`btn flex items-center gap-1.5 ${sc.data?.autopilot ? 'border-green-500/60 bg-green-500/15 text-green-300' : ''}`}>
+            <Bot size={14} /> Self-healing autopilot: <b>{sc.data?.autopilot ? 'ON' : 'OFF'}</b></button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => call('/faults/chaos')}>Run automated chaos mode</button></div>} bodyClass="p-3">
         {!sc.data ? <Loading /> : (
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {sc.data.scenarios.map((s: any) => {
@@ -131,7 +139,7 @@ export default function Faults() {
       <div id="fault-timeline" className="scroll-mt-4">
         <Panel title={live ? `Timeline · ${titles[live.scenario] || live.scenario}` : 'Timeline'} right={live && <StatusBadge status={live.status} />} bodyClass="p-3 space-y-3">
           {!live ? <Empty>Inject a fault to see FAULT INJECTED → SYSTEM RESPONSE → RECOVERY ACTION → FINAL STATE</Empty> : <>
-            {live.steps.length === 0 ? <div className="text-xs text-muted">Starting…</div> : <FaultTimeline steps={live.steps} />}
+            <IncidentConsole run={live} title={titles[live.scenario] || live.scenario} />
             {live.outcome && (
               <div className={`rounded border p-2.5 text-xs ${live.status === 'COMPLETED' ? 'border-green-500/40 bg-green-500/5' : 'border-amber-500/40 bg-amber-500/5'}`}>
                 <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Outcome</div>

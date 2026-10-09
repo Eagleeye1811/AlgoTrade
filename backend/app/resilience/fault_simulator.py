@@ -5,6 +5,11 @@ strategy logic, internal state, process state) and then observes how the actual 
 The timeline (FAULT INJECTED -> SYSTEM RESPONSE -> RECOVERY ACTION -> FINAL STATE) is built from
 what the engine actually did, read back from its state - never from scripted text alone.
 Automated Chaos Mode runs several scenarios back-to-back through the same simulator.
+
+Self-healing Autopilot (optional, persisted): after a scenario it verifies the platform - a fresh reconciliation,
+broker reachability, market data, order blocks, SAFE MODE, halted strategies - and only when every check passes and
+the fault left trading PAUSED (it was RUNNING before) resumes trading after a 5 s countdown. It never resumes a
+strategy halted by the circuit breaker or leaves SAFE MODE: those need a human, and it says so. Phase "AUTOPILOT".
 """
 from __future__ import annotations
 
@@ -32,6 +37,9 @@ if TYPE_CHECKING:
 log = logging.getLogger("algotrade.faults")
 
 INJECT, RESPONSE, RECOVERY, FINAL = "FAULT_INJECTED", "SYSTEM_RESPONSE", "RECOVERY_ACTION", "FINAL_STATE"
+AUTOPILOT = "AUTOPILOT"
+AUTOPILOT_KEY = "fault_autopilot"
+AUTOPILOT_COUNTDOWN_S = 5
 
 
 class ScenarioAborted(Exception):
@@ -94,6 +102,72 @@ class FaultSimulator:
         self._lock = asyncio.Lock()
         self.active: dict[str, Any] | None = None
         self.chaos_task: asyncio.Task | None = None
+        self.autopilot: bool | None = None  # loaded from system_state on first use
+
+    # ------------------------------------------------------------------ self-healing autopilot
+    async def autopilot_enabled(self) -> bool:
+        if self.autopilot is None:
+            self.autopilot = bool((await self.sys.state.get(AUTOPILOT_KEY) or {}).get("enabled", False))
+        return self.autopilot
+
+    async def set_autopilot(self, enabled: bool, actor: str) -> bool:
+        self.autopilot = enabled
+        await self.sys.state.set(AUTOPILOT_KEY, {"enabled": enabled})
+        await self.sys.audit.record("AUTOPILOT_" + ("ENABLED" if enabled else "DISABLED"),
+                                    f"self-healing autopilot {'enabled' if enabled else 'disabled'} by {actor}",
+                                    source="FaultSimulator", actor=actor)
+        return enabled
+
+    def _checks(self) -> list[tuple[str, bool, str]]:
+        sys = self.sys
+        ctl = sys.controller
+        mkt = sys.market.display_status()
+        return [
+            ("Broker (021) reachable", sys.broker.available, "connected" if sys.broker.available else "unavailable"),
+            ("Market data flowing", mkt in ("LIVE", "REPLAY"), mkt),
+            ("No order blocks", not ctl.blocks, "none" if not ctl.blocks else "; ".join(ctl.blocks.values())),
+            ("Not in SAFE MODE", ctl.status != "SAFE_MODE", ctl.status),
+        ]
+
+    async def _autopilot(self, tl: "Timeline", trading_before: str) -> str:
+        sys = self.sys
+        await tl.step(AUTOPILOT, "Autopilot engaged", "self-healing verification of the whole platform", "info")
+        rec = await sys.reconciler.run("AUTOPILOT", tl.corr)
+        rec_ok = rec.get("status") in ("MATCHED", "MISMATCH_RESOLVED")
+        await tl.step(AUTOPILOT, f"Reconciliation vs 021: {rec.get('status')}", rec.get("summary", ""), "ok" if rec_ok else "error")
+        checks = [("Internal state matches 021", rec_ok, rec.get("status", "?"))] + self._checks()
+        for name, ok, detail in checks[1:]:
+            await tl.step(AUTOPILOT, f"{'✔' if ok else '✘'} {name}", detail, "ok" if ok else "error")
+        halted = [rt for rt in sys.strategies.runtimes.values() if rt.status == "HALTED"]
+        failed = [n for n, ok, _ in checks if not ok]
+        human = [f"{rt.name} ({rt.id}) is HALTED by the circuit breaker - review, then Resume it" for rt in halted]
+        if failed:
+            decision = "stood down - " + ", ".join(failed)
+            await tl.step(AUTOPILOT, "Autopilot stands down - human action required",
+                          "failed checks: " + ", ".join(failed) + (". " + "; ".join(human) if human else ""), "warn")
+        elif sys.controller.status == "PAUSED" and trading_before == RUNNING:
+            await tl.step(AUTOPILOT, f"All checks green - resuming trading in {AUTOPILOT_COUNTDOWN_S} s",
+                          "the fault left trading PAUSED; it was RUNNING before", "warn", {"countdown_s": AUTOPILOT_COUNTDOWN_S})
+            await asyncio.sleep(AUTOPILOT_COUNTDOWN_S)
+            again = [n for n, ok, _ in self._checks() if not ok]
+            if again or sys.controller.status != "PAUSED":
+                decision = "aborted resume - " + (", ".join(again) or f"trading became {sys.controller.status}")
+                await tl.step(AUTOPILOT, "Resume aborted", decision, "warn")
+            else:
+                await sys.start_trading("autopilot")
+                decision = "trading resumed automatically"
+                await tl.step(AUTOPILOT, "Trading RESUMED by autopilot", "orders allowed again"
+                              + (". Still needs a human: " + "; ".join(human) if human else ""), "ok")
+        else:
+            decision = f"no action needed - trading {sys.controller.status}, all checks green"
+            await tl.step(AUTOPILOT, "Healthy - no action needed",
+                          f"trading {sys.controller.status}; all checks green" + (". Needs a human: " + "; ".join(human) if human else ""),
+                          "ok" if not human else "warn")
+        await sys.audit.record("AUTOPILOT_DECISION", f"autopilot after '{self.SCENARIOS[tl.scenario][0]}': {decision}",
+                               source="FaultSimulator", severity="INFO" if not failed else "WARN", actor="autopilot",
+                               correlation_id=tl.corr, payload={"checks": [{"check": n, "ok": ok, "detail": d} for n, ok, d in checks],
+                                                                "halted": [rt.id for rt in halted]})
+        return decision
 
     # ------------------------------------------------------------------ helpers
     def catalog(self) -> list[dict[str, str]]:
@@ -188,6 +262,7 @@ class FaultSimulator:
                                         source="FaultSimulator", severity="WARN", actor=actor, correlation_id=corr,
                                         payload={"scenario": scenario, "params": params})
             status, outcome = "COMPLETED", ""
+            trading_before = self.sys.controller.status
             try:
                 outcome = await getattr(self, f"_s_{scenario}")(tl, params)
             except ScenarioAborted as e:
@@ -200,7 +275,13 @@ class FaultSimulator:
                 self.sys.broker.adapter.faults.disarm()  # never leak an armed fault into real trading
                 if scenario == "stale_data" and self.sys.market.provider and self.sys.market.provider.paused:
                     self.sys.market.provider.resume()
-                self.active = None
+            if status != "ABORTED" and await self.autopilot_enabled():
+                try:
+                    outcome += f" | autopilot: {await self._autopilot(tl, trading_before)}"
+                except Exception as e:
+                    log.exception("autopilot failed")
+                    await tl.step(AUTOPILOT, "Autopilot error", str(e), "error")
+            self.active = None
             async with self.sys.db.transaction() as s:
                 await s.execute(update(FaultSimulation).where(FaultSimulation.id == run_id).values(
                     status=status, outcome=outcome, finished_at=utcnow()))
@@ -402,6 +483,14 @@ class FaultSimulator:
         await tl.step(INJECT, "Process restart", "trading engine stopped; ALL in-memory state discarded (positions cache, "
                       "open orders, strategy state, risk cache, order blocks). PostgreSQL, Redis and the broker keep running.",
                       "error")
+
+        async with self.sys.db.session() as s:
+            persisted = (await s.execute(select(Position).where(Position.quantity != 0))).scalars().all()
+        await tl.step(RESPONSE, "Fail-closed: no orders while the engine is down",
+                      f"the order path is offline until state is rebuilt and reconciled; {len(persisted)} open position(s) and "
+                      f"{len(self.sys.orders.open_orders)} working order(s) are safe in PostgreSQL / at 021", "warn")
+        await tl.step(RESPONSE, "Trading will come back PAUSED", "after a restart an operator (or the autopilot) must "
+                      "confirm before strategies trade again", "info")
 
         async def report(title: str, detail: str, status: str = "ok", data: dict | None = None):
             await tl.step(RECOVERY, title, detail, status, data)

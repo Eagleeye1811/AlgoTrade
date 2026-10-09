@@ -335,3 +335,28 @@ async def test_demo_reset_keeps_unsubscribed_strategies_stopped(trading):
     await sys_.demo.reset("admin")
     assert "breakout" not in sys_.strategies.runtimes
     assert {"ema_trend", "rsi_ema", "macd"} <= set(sys_.strategies.runtimes)
+
+
+async def test_autopilot_resumes_trading_after_restart_only_when_checks_pass(trading, monkeypatch):
+    sys_ = trading
+    import app.resilience.fault_simulator as fs
+    monkeypatch.setattr(fs, "AUTOPILOT_COUNTDOWN_S", 0)
+    await sys_.faults.set_autopilot(True, "test")
+    res = await sys_.faults.run("server_restart", "test")
+    phases = [s["phase"] for s in res["steps"]]
+    assert "SYSTEM_RESPONSE" in phases and "AUTOPILOT" in phases
+    assert any(s["title"] == "Trading RESUMED by autopilot" for s in res["steps"]), res["steps"]
+    assert sys_.controller.status == "RUNNING" and "autopilot: trading resumed automatically" in res["outcome"]
+
+
+async def test_autopilot_never_overrides_safe_mode(trading, monkeypatch):
+    sys_ = trading
+    import app.resilience.fault_simulator as fs
+    monkeypatch.setattr(fs, "AUTOPILOT_COUNTDOWN_S", 0)
+    await sys_.faults.set_autopilot(True, "test")
+    await sys_.kill_switch.activate("test", "test", wait=True)
+    assert sys_.controller.status == "SAFE_MODE"
+    res = await sys_.faults.run("state_corruption", "test")
+    titles = [s["title"] for s in res["steps"] if s["phase"] == "AUTOPILOT"]
+    assert "Autopilot stands down - human action required" in titles
+    assert sys_.controller.status == "SAFE_MODE"

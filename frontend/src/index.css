@@ -24,3 +24,11 @@ body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 13px
 .panel-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #1f2a37; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #7d8a9c; font-weight: 600; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #1f2a37; border-radius: 4px; }
+
+/* incident console (Fault Lab): events slide in, the active phase/component glows, an active link flows */
+@keyframes ic-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.ic-in { animation: ic-in .35s ease-out both; }
+@keyframes ic-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(56,189,248,.0); } 50% { box-shadow: 0 0 0 4px rgba(56,189,248,.35); } }
+.ic-glow { animation: ic-glow 1.1s ease-in-out infinite; }
+@keyframes ic-flow { from { background-position: 0 0; } to { background-position: 24px 0; } }
+.ic-flow { background-image: repeating-linear-gradient(90deg, #38bdf8 0 8px, transparent 8px 12px); background-size: 24px 2px; animation: ic-flow .6s linear infinite; }

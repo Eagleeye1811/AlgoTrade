@@ -76,9 +76,19 @@ async def health(_: User = Depends(current_user), sys: TradingSystem = Depends(g
 # ------------------------------------------------------------------ fault lab
 @router.get("/faults/scenarios")
 async def scenarios(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
-    return {"scenarios": sys.faults.catalog(), "active": sys.faults.active,
+    return {"scenarios": sys.faults.catalog(), "active": sys.faults.active, "autopilot": await sys.faults.autopilot_enabled(),
             "chaos_running": bool(sys.faults.chaos_task and not sys.faults.chaos_task.done()),
             "chaos_sequence": sys.faults.CHAOS_SEQUENCE, "broker_faults": sys.broker.adapter.faults.to_dict()}
+
+
+class AutopilotIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/faults/autopilot")
+async def set_autopilot(body: AutopilotIn, user: User = Depends(require_admin), sys: TradingSystem = Depends(get_system)):
+    """ADMIN: self-healing autopilot - after a fault, verify the platform and resume trading only if everything passes."""
+    return {"autopilot": await sys.faults.set_autopilot(body.enabled, actor(user))}
 
 
 class FaultIn(BaseModel):
