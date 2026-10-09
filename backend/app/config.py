@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     yahoo_base_url: str = "https://query1.finance.yahoo.com"
     yahoo_timeout_s: float = 8.0
     live_poll_interval_s: float = 4.0  # one symbol per poll (round-robin)
+    live_focus_poll_interval_s: float = 2.5  # symbols open in a chart are also polled this often (forming candle)
     replay_speed: float = 1.0  # market minutes per wall minute (1 = real time, like a live platform)
     replay_warmup_bars: int = 60
     replay_data_dir: str = "data/replay"

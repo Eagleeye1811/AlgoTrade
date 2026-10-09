@@ -322,10 +322,18 @@ class ReplayProvider(MarketDataProvider):
 class LiveYahooProvider(MarketDataProvider):
     mode = "LIVE"
 
-    def __init__(self, symbols: list[str], client: YahooChartClient, poll_interval_s: float = 4.0):
+    MAX_FOCUS = 3  # cap the fast lane (several open charts) to stay well inside Yahoo's rate limits
+
+    def __init__(self, symbols: list[str], client: YahooChartClient, poll_interval_s: float = 4.0,
+                 focus_interval_s: float = 2.5):
         super().__init__(symbols)
         self.client = client
         self.poll_interval_s = poll_interval_s
+        # Fast lane: symbols open in a chart are polled every focus_interval_s so their forming candle builds
+        # in near real time; the rest keep the round-robin (each ~len(symbols) * poll_interval_s).
+        self.focus_interval_s = focus_interval_s
+        self.focus: Callable[[], list[str]] | None = None
+        self._locks: dict[str, asyncio.Lock] = {}
         self.source_name = "Yahoo Finance chart API (public endpoint, best-effort, may be delayed)"
         self.last_bar: dict[str, Bar] = {}
         self.failures = 0
@@ -349,7 +357,19 @@ class LiveYahooProvider(MarketDataProvider):
     def dropped_bars(self, v: int) -> None:
         pass
 
+    def current_focus(self) -> list[str]:
+        try:
+            f = self.focus() if self.focus else []
+        except Exception:
+            f = []
+        return [s for s in f if s in self.symbols][: self.MAX_FOCUS]
+
     async def _poll_symbol(self, sym: str) -> datetime | None:
+        # both lanes may hit the same symbol; serialise so last_bar/volume deltas stay consistent
+        async with self._locks.setdefault(sym, asyncio.Lock()):
+            return await self._poll_symbol_locked(sym)
+
+    async def _poll_symbol_locked(self, sym: str) -> datetime | None:
         bars, _, dropped = await self.client.fetch_bars(sym, "1m", "1d")
         self._dropped[sym] = dropped
         self.last_latency_ms = self.client.last_latency_ms
@@ -361,12 +381,12 @@ class LiveYahooProvider(MarketDataProvider):
             if prev is not None and b.ts == prev.ts:
                 dv = max(b.volume - prev.volume, Decimal(0))
                 if b.close != prev.close or dv > 0:
-                    await self._emit(Tick(sym, b.ts, b.close, dv, "yahoo", b.high, b.low))
+                    await self._emit(Tick(sym, b.ts, b.close, dv, "yahoo", b.high, b.low, b.open))
             else:
                 if prev is not None and self.on_bar_close:
                     await self.on_bar_close(sym, prev.ts)
-                await self._emit(Tick(sym, b.ts, b.open, Decimal(0), "yahoo", b.open, b.open))
-                await self._emit(Tick(sym, b.ts, b.close, b.volume, "yahoo", b.high, b.low))
+                await self._emit(Tick(sym, b.ts, b.open, Decimal(0), "yahoo", b.open, b.open, b.open))
+                await self._emit(Tick(sym, b.ts, b.close, b.volume, "yahoo", b.high, b.low, b.open))
             prev = b
         self.last_bar[sym] = bars[-1]
         return bars[-1].ts
@@ -375,33 +395,55 @@ class LiveYahooProvider(MarketDataProvider):
         if self.on_tick:
             await self.on_tick(tick)
 
+    async def _poll_once(self, sym: str) -> bool:
+        try:
+            if time.time() < self.outage_until:
+                raise MarketDataError("market-data API unreachable (injected outage)")
+            newest = await self._poll_symbol(sym)
+            self.failures = 0
+            self.last_error = None
+            if newest is not None:
+                lag = (datetime.now(timezone.utc) - newest).total_seconds()
+                if lag <= 120:
+                    await self._set_status(LIVE, f"newest bar {lag:.0f}s old")
+                else:
+                    await self._set_status(DELAYED, f"newest bar {lag / 60:.1f} min old")
+            return True
+        except MarketDataError as e:
+            self.failures += 1
+            self.last_error = str(e)
+            if self.failures >= 3:
+                await self._set_status(DISCONNECTED, str(e))
+            await asyncio.sleep(min(30, self.poll_interval_s * self.failures))
+            return False
+
     async def _run(self) -> None:
-        i = 0
         await self._set_status(DELAYED, "connecting")
+        await asyncio.gather(self._round_robin(), self._focus_lane())
+
+    async def _round_robin(self) -> None:
+        i = 0
         while True:
             await self._paused.wait()
-            sym = self.symbols[i % len(self.symbols)]
+            focus = set(self.current_focus())
+            rest = [s for s in self.symbols if s not in focus] or self.symbols
+            sym = rest[i % len(rest)]
             i += 1
-            try:
-                if time.time() < self.outage_until:
-                    raise MarketDataError("market-data API unreachable (injected outage)")
-                newest = await self._poll_symbol(sym)
-                self.failures = 0
-                self.last_error = None
-                if newest is not None:
-                    lag = (datetime.now(timezone.utc) - newest).total_seconds()
-                    if lag <= 120:
-                        await self._set_status(LIVE, f"newest bar {lag:.0f}s old")
-                    else:
-                        await self._set_status(DELAYED, f"newest bar {lag / 60:.1f} min old")
-            except MarketDataError as e:
-                self.failures += 1
-                self.last_error = str(e)
-                if self.failures >= 3:
-                    await self._set_status(DISCONNECTED, str(e))
-                await asyncio.sleep(min(30, self.poll_interval_s * self.failures))
+            if await self._poll_once(sym):
+                await asyncio.sleep(self.poll_interval_s)
+
+    async def _focus_lane(self) -> None:
+        j = 0
+        while True:
+            await self._paused.wait()
+            focus = self.current_focus()
+            if not focus:
+                await asyncio.sleep(0.5)
                 continue
-            await asyncio.sleep(self.poll_interval_s)
+            sym = focus[j % len(focus)]
+            j += 1
+            if await self._poll_once(sym):
+                await asyncio.sleep(self.focus_interval_s)  # fixed request rate; shared by open charts
 
 
 # --------------------------------------------------------------------------- tests

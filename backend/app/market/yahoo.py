@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -70,9 +71,26 @@ def parse_chart(symbol: str, data: dict) -> tuple[list[Bar], dict, int]:
             continue
         bars.append(Bar(symbol, datetime.fromtimestamp(int(t), tz=timezone.utc), o, h, l, c, Decimal(int(v))))
     bars.sort(key=lambda b: b.ts)
-    # de-duplicate timestamps (keep last)
-    dedup: dict[datetime, Bar] = {b.ts: b for b in bars}
-    return list(dedup.values()), meta, dropped
+    return _by_minute(bars), meta, dropped
+
+
+def _by_minute(bars: list[Bar]) -> list[Bar]:
+    """Key every bar by its minute. During the session Yahoo appends a zero-volume "current price" point stamped
+    mid-minute (e.g. 11:23:35 = meta.regularMarketTime), often while the forming 11:23:00 bar is still null.
+    That point is the latest trade of its minute: it updates that minute's close/high/low, or stands in for the
+    minute (O=H=L=C, volume 0) until the real bar arrives. Left unmerged, its odd timestamp made the live poller
+    skip the real bar of that minute on the next poll."""
+    out: dict[datetime, Bar] = {}
+    for b in bars:  # sorted: the minute-aligned bar comes before any point inside its minute
+        m = b.ts.replace(second=0, microsecond=0)
+        cur = out.get(m)
+        if cur is None:
+            out[m] = replace(b, ts=m)
+        elif b.ts == m:
+            out[m] = b  # duplicate timestamp: keep last
+        else:
+            out[m] = replace(cur, high=max(cur.high, b.close), low=min(cur.low, b.close), close=b.close)
+    return list(out.values())
 
 
 class YahooChartClient:

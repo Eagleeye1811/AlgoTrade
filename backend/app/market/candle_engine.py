@@ -1,6 +1,7 @@
 """Builds 1m / 5m OHLCV candles from ticks. Candles are never fabricated: gaps stay gaps."""
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -26,6 +27,9 @@ class _Working:
 CandleCallback = Callable[[str, str, Bar], Awaitable[None]]
 
 
+UPDATE_MIN_GAP_S = 0.2  # max 5 candle.update pushes per second per (symbol, timeframe)
+
+
 class CandleEngine:
     def __init__(self, max_candles: int = 2000):
         self.closed: dict[tuple[str, str], deque[Bar]] = {}
@@ -35,11 +39,18 @@ class CandleEngine:
         self.on_update: CandleCallback | None = None
         self.gaps: dict[str, int] = {}
         self._last_update_push: dict[tuple[str, str], float] = {}
+        self._trailing: dict[tuple[str, str], asyncio.Task] = {}
 
     def _series(self, symbol: str, tf: str) -> deque[Bar]:
         return self.closed.setdefault((symbol, tf), deque(maxlen=self.max_candles))
 
+    def cancel_pending(self) -> None:
+        for t in list(self._trailing.values()):
+            t.cancel()
+        self._trailing.clear()
+
     def reset(self) -> None:
+        self.cancel_pending()
         self.closed.clear()
         self.working.clear()
         self.gaps.clear()
@@ -81,20 +92,39 @@ class CandleEngine:
                 w = None
             elif w is not None and b < w.ts:
                 continue  # out-of-order tick for an already-advanced bucket: ignore
+            # the source bar's real traded range (live: Yahoo's bar high/low; replay: range seen so far)
+            hi = max(tick.price, tick.range_high) if tick.range_high is not None else tick.price
+            lo = min(tick.price, tick.range_low) if tick.range_low is not None else tick.price
             if w is None:
                 last = self._series(*key)
                 if last and last[-1].ts >= b:
                     continue  # tick belongs to an already closed candle
-                w = Bar(tick.symbol, b, tick.price, tick.price, tick.price, tick.price, tick.volume)
+                op = tick.bar_open if tick.bar_open is not None else tick.price
+                w = Bar(tick.symbol, b, op, max(hi, op), min(lo, op), tick.price, tick.volume)
             else:
-                w = replace(w, high=max(w.high, tick.price), low=min(w.low, tick.price), close=tick.price,
-                            volume=w.volume + tick.volume)
+                w = replace(w, high=max(w.high, hi), low=min(w.low, lo), close=tick.price, volume=w.volume + tick.volume)
+                if tick.bar_open is not None and bucket(tick.ts, 60) == w.ts:  # source bar opens this candle
+                    w = replace(w, open=tick.bar_open, high=max(w.high, tick.bar_open), low=min(w.low, tick.bar_open))
             self.working[key] = w
             if self.on_update:
                 now = time.monotonic()
-                if now - self._last_update_push.get(key, 0) >= 0.2:
+                wait = UPDATE_MIN_GAP_S - (now - self._last_update_push.get(key, 0))
+                if wait <= 0:
                     self._last_update_push[key] = now
                     await self.on_update(tick.symbol, tf, w)
+                elif key not in self._trailing:
+                    # throttled: still deliver the latest state of this burst once the gap has passed
+                    self._trailing[key] = asyncio.create_task(self._push_later(key, wait))
+
+    async def _push_later(self, key: tuple[str, str], delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            self._trailing.pop(key, None)
+        w = self.working.get(key)  # None if the candle closed meanwhile (close_minute already pushed it)
+        if w is not None and self.on_update:
+            self._last_update_push[key] = time.monotonic()
+            await self.on_update(key[0], key[1], w)
 
     async def close_minute(self, symbol: str, minute_ts: datetime) -> None:
         """Explicit bar-complete signal from the provider (no need to wait for the next tick)."""

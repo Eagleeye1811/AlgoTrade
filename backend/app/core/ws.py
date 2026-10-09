@@ -13,7 +13,9 @@ from app.core.events import CHANNEL, Event
 from app.core.redis_client import RedisClient
 
 log = logging.getLogger("algotrade.ws")
-MARKET_EVENTS = ("market.tick", "candle.update")
+# Candle updates are only sent for the symbols a client subscribed to (its open chart). Ticks go to every
+# client so watchlists stay live; they are already throttled to <= 4/s per symbol by the market service.
+SYMBOL_FILTERED_EVENTS = ("candle.update",)
 
 
 class _Client:
@@ -70,6 +72,14 @@ class WSManager:
                 log.warning("redis subscription lost: %s - retrying", e)
                 await asyncio.sleep(2)
 
+    def focus_symbols(self) -> list[str]:
+        """Symbols currently open in a chart on any connected client (they asked for its candle updates)."""
+        out: set[str] = set()
+        for c in self.clients:
+            if c.symbols:
+                out |= c.symbols
+        return sorted(out)
+
     async def broadcast(self, data: str, event_type: str, symbol: str | None, event_id: str | None) -> None:
         if event_id:
             if event_id in self._seen:
@@ -78,7 +88,7 @@ class WSManager:
             if len(self._seen) > 20000:
                 self._seen.popitem(last=False)
         for c in list(self.clients):
-            if event_type in MARKET_EVENTS and c.symbols is not None and symbol not in c.symbols:
+            if event_type in SYMBOL_FILTERED_EVENTS and c.symbols is not None and symbol not in c.symbols:
                 continue
             try:
                 c.queue.put_nowait(data)

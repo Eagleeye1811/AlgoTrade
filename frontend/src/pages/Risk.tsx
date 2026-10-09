@@ -34,7 +34,7 @@ export default function Risk() {
       </div>
       <div className="grid gap-3 lg:grid-cols-3">
         {Object.entries(d.strategies).map(([sid, s]: any) => (
-          <Panel key={sid} title={<Link to={`/strategies/${sid}`} className="hover:text-text">{s.name} · {s.symbol}</Link>} right={<StatusBadge status={s.status} />} bodyClass="p-3 space-y-3">
+          <Panel key={sid} title={<Link to={`/strategies/${sid}`} className="hover:text-text">{s.name}</Link>} right={<StatusBadge status={s.status} />} bodyClass="p-3 space-y-3">
             {s.status_reason && <div className="text-xs text-amber-400">{s.status_reason}</div>}
             {s.meters.map((m: any) => <Meter key={m.label} m={m} />)}
           </Panel>

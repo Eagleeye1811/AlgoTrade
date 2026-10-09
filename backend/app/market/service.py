@@ -60,7 +60,10 @@ class MarketDataService:
     async def _make_provider(self, mode: str) -> MarketDataProvider:
         syms = self.settings.symbol_list
         if mode == "live":
-            return LiveYahooProvider(syms, self.client, self.settings.live_poll_interval_s)
+            prov = LiveYahooProvider(syms, self.client, self.settings.live_poll_interval_s,
+                                     self.settings.live_focus_poll_interval_s)
+            prov.focus = self.sys.ws.focus_symbols
+            return prov
         if mode == "manual":
             return ManualProvider(syms)
         prov = ReplayProvider(syms, self.sys.db, self.client, self.settings.replay_data_dir,
@@ -169,6 +172,7 @@ class MarketDataService:
             self._scheduler = None
         if self.provider:
             await self.provider.stop()
+        self.candles.cancel_pending()
 
     async def close(self) -> None:
         await self.stop()
@@ -279,6 +283,9 @@ class MarketDataService:
             mt = p.market_time
             d.update({"speed": p.speed, "ticks_per_bar": p.ticks_per_bar, "cursor": p.cursor, "total_minutes": len(p.timeline),
                       "market_time": mt.isoformat() if mt else None, "ended": p.ended})
+        if isinstance(p, LiveYahooProvider):
+            d.update({"poll_interval_s": p.poll_interval_s, "focus_poll_interval_s": p.focus_interval_s,
+                      "focus_symbols": p.current_focus()})
         d["ltp"] = {s: float(t.price) for s, (t, _) in self.last.items()}
         return d
 
