@@ -1,0 +1,11 @@
+{
+  "name": "PLACEHOLDER - NSE equity intraday (typical discount-broker schedule)",
+  "source": "Placeholder until the hackathon's published charges table is provided. Replace this file; no code change needed.",
+  "brokerage": {"pct_of_turnover": 0.03, "max_per_order": 20.0},
+  "stt": {"sell_pct": 0.025, "buy_pct": 0.0},
+  "exchange_txn_pct": 0.00297,
+  "sebi_per_crore": 10.0,
+  "stamp_duty": {"buy_pct": 0.003, "sell_pct": 0.0},
+  "gst_pct": 18.0,
+  "gst_on": ["brokerage", "exchange_txn", "sebi"]
+}

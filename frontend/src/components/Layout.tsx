@@ -1,21 +1,19 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, AlertOctagon, BarChart3, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Settings, ShieldCheck, Wallet } from 'lucide-react'
+import { Activity, AlertOctagon, BarChart3, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Receipt, Settings, ShieldCheck, Wallet } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useWsStatus } from '../hooks/useEvents'
 import { api } from '../services/api'
-import { fmtMarketTime, fmtQty } from '../services/format'
+import { fmtQty } from '../services/format'
 import { wsClient } from '../services/ws'
 import { Badge, ErrorText, Modal, StatusBadge } from './ui'
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/strategies', label: 'Strategies', icon: CandlestickChart, end: true },
-  { to: '/strategies/rsi_ema', label: 'RSI + EMA', sub: true },
-  { to: '/strategies/macd', label: 'MACD', sub: true },
-  { to: '/strategies/breakout', label: 'Breakout', sub: true },
   { to: '/orders', label: 'Orders & Execution', icon: ListOrdered },
+  { to: '/trades', label: 'Trades & Net P&L', icon: Receipt },
   { to: '/positions', label: 'Positions & P&L', icon: Wallet },
   { to: '/risk', label: 'Risk', icon: ShieldCheck },
   { to: '/health', label: 'Reconciliation & Health', icon: Activity },
@@ -39,8 +37,8 @@ export default function Layout() {
           <nav className="flex-1 overflow-auto py-2">
             {NAV.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.end}
-                className={({ isActive }) => `flex items-center gap-2 px-4 ${n.sub ? 'py-1 pl-10 text-[12px]' : 'py-1.5'} ${isActive ? 'bg-panel2 text-white border-l-2 border-info' : 'text-muted hover:text-text border-l-2 border-transparent'}`}>
-                {n.icon && <n.icon size={14} />}{n.label}
+                className={({ isActive }) => `flex items-center gap-2 px-4 py-1.5 ${isActive ? 'bg-panel2 text-white border-l-2 border-info' : 'text-muted hover:text-text border-l-2 border-transparent'}`}>
+                <n.icon size={14} />{n.label}
               </NavLink>
             ))}
           </nav>
@@ -63,7 +61,7 @@ export default function Layout() {
 function MobileNav() {
   return (
     <div className="flex gap-1 overflow-x-auto border-b border-line px-2 py-1.5 md:hidden">
-      {NAV.filter((n) => !n.sub).map((n) => (
+      {NAV.map((n) => (
         <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => `whitespace-nowrap rounded px-2 py-1 text-xs ${isActive ? 'bg-panel2 text-white' : 'text-muted'}`}>{n.label}</NavLink>
       ))}
     </div>
@@ -89,10 +87,9 @@ function TopBar() {
           <BarChart3 size={18} className="text-info" />
           <span className="text-[15px] font-bold tracking-tight text-white">AlgoTrade</span>
         </div>
-        <Badge tone="purple">Paper trading · Simulated execution</Badge>
+        <Badge tone="purple">021 sandbox · simulated exchange</Badge>
         <div className="flex items-center gap-1.5 text-xs" title={m?.source}>
           <span className="text-muted">Market</span><StatusBadge status={m?.display_status} />
-          {m?.market_time && <span className="num text-muted hidden lg:inline">{fmtMarketTime(m.market_time)}{m.speed ? ` · ${m.speed}x` : ''}</span>}
         </div>
         <div className="flex items-center gap-1.5 text-xs"><span className="text-muted">Broker</span>
           <StatusBadge status={overview?.broker ? (overview.broker.available ? 'CONNECTED' : 'UNAVAILABLE') : undefined} />
@@ -158,6 +155,8 @@ function SafeModeBanner() {
         <span className="text-red-200">{overview.trading.reason}</span>
         {ks.phase && <Badge tone="red">{String(ks.phase).replace(/_/g, ' ')}</Badge>}
         {ks.cancelled && <span className="text-red-200">{ks.cancelled.length} order(s) cancelled · {ks.close_orders?.length ?? 0} close order(s)</span>}
+        {ks.elapsed_s != null && <Badge tone={ks.within_deadline ? 'green' : 'amber'}>
+          {ks.within_deadline ? `flat in ${Number(ks.elapsed_s).toFixed(2)}s (≤ ${ks.deadline_s ?? 10}s)` : `${Number(ks.elapsed_s).toFixed(2)}s - not fully flat`}</Badge>}
         {user?.role === 'ADMIN' && (
           <span className="ml-auto flex gap-2">
             {ks.unresolved?.length > 0 && <button className="btn" disabled={busy} onClick={() => act('/kill-switch/retry-close')}>Retry close</button>}

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -38,9 +40,20 @@ async def recon_run(user: User = Depends(require_trader), sys: TradingSystem = D
     return await sys.reconciler.run("MANUAL")
 
 
+@router.post("/reconciliation/adopt-baseline")
+async def recon_adopt_baseline(user: User = Depends(require_admin), sys: TradingSystem = Depends(get_system)):
+    """ADMIN: acknowledge broker fills/orders the platform has no record of (only when positions match)."""
+    if sys.account is None:
+        raise HTTPException(400, "trading account not configured")
+    try:
+        return await sys.reconciler.adopt_baseline(actor(user))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/broker/state")
 async def broker_state(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
-    """Paper broker's own view (independent venue state) for side-by-side comparison."""
+    """The broker's own view (021 positions + order book) for side-by-side comparison with the internal books."""
     if sys.account is None:
         raise HTTPException(400, "trading account not configured")
     a = sys.broker.adapter
@@ -52,7 +65,7 @@ async def broker_state(_: User = Depends(current_user), sys: TradingSystem = Dep
         raise HTTPException(503, f"broker unreachable: {e}")
     return {"account": acct.__dict__, "positions": [p.__dict__ for p in pos],
             "orders": [o.to_dict() for o in orders[-50:]], "internal_net": sys.positions.net_by_symbol(),
-            "faults": a.faults.to_dict(), "gateway": sys.broker.info()}
+            "faults": a.faults.to_dict() if hasattr(a.faults, "to_dict") else dataclasses.asdict(a.faults), "gateway": sys.broker.info()}
 
 
 # ------------------------------------------------------------------ health / recovery

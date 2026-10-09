@@ -1,15 +1,19 @@
-"""Emergency Kill Switch.
+"""Emergency Kill Switch - everything stopped, cancelled and flat within DEADLINE_S (10 s).
 
-1. SAFE MODE immediately (strategy signals stop producing orders; Risk Firewall blocks new orders)
-2. cancel all pending orders
-3. emergency MARKET close orders for every open position (POC policy: flatten everything),
-   tracked through the normal order/fill pipeline
-4. positions that cannot be closed are reported as UNRESOLVED - never hidden
+1. SAFE MODE immediately: no strategy can place an order (Risk Firewall global gate), runaway loops cancelled
+2. all working orders cancelled in parallel
+3. an emergency reduce-only MARKET close for every open position, in parallel, through the normal
+   order/fill pipeline (each strategy's book is closed separately, so per-strategy P&L stays exact)
+4. until the deadline: any position still open without a working close order (partial fill, rejected or
+   failed close, a fill that arrived late) gets a new close order
+5. positions still open at the deadline are reported as UNRESOLVED - never hidden; retry_close() tries again
+The elapsed time is recorded so the 10-second guarantee is visible in the UI and the audit trail.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from app.core.events import Event, new_id, utcnow
@@ -20,6 +24,9 @@ if TYPE_CHECKING:
     from app.engine.system import TradingSystem
 
 log = logging.getLogger("algotrade.kill_switch")
+DEADLINE_S = 10.0
+CANCEL_WAIT_S = 2.5  # max wait for cancel confirmations before closing positions anyway
+RECLOSE_GAP_S = 1.5  # per position: never re-close sooner (a fill's position update must land first)
 
 
 class KillSwitch:
@@ -27,6 +34,8 @@ class KillSwitch:
         self.sys = system
         self.state: dict[str, Any] = {"active": False}
         self._task: asyncio.Task | None = None
+        self._t0 = 0.0
+        self._last_close: dict[tuple[str, str], float] = {}
 
     async def load(self) -> None:
         st = await self.sys.state.get("kill_switch")
@@ -39,11 +48,13 @@ class KillSwitch:
                                          payload=self.state))
 
     async def activate(self, actor: str, reason: str = "manual activation", wait: bool = False,
-                       close_timeout_s: float = 20.0) -> dict[str, Any]:
+                       deadline_s: float = DEADLINE_S) -> dict[str, Any]:
         sys = self.sys
         async with sys.redis.lock("kill_switch", timeout_s=60):
             if self.state.get("active") and self.state.get("phase") != "COMPLETED_WITH_ERRORS":
                 return self.state
+            self._t0 = time.monotonic()
+            self._last_close = {}
             corr = new_id()
             # 1. stop everything new - first, before anything else
             await sys.controller.set_status(SAFE_MODE, f"EMERGENCY KILL SWITCH: {reason}", actor=actor)
@@ -51,49 +62,65 @@ class KillSwitch:
                 if rt.runaway_task:
                     rt.runaway_task.cancel()
             self.state = {"active": True, "phase": "CANCELLING", "activated_at": utcnow().isoformat(), "by": actor,
-                          "reason": reason, "correlation_id": corr, "cancelled": [], "cancel_failed": [],
-                          "close_orders": [], "unresolved": [], "completed_at": None}
+                          "reason": reason, "correlation_id": corr, "deadline_s": deadline_s, "cancelled": [],
+                          "cancel_failed": [], "close_orders": [], "unresolved": [], "completed_at": None,
+                          "elapsed_s": None, "within_deadline": None}
             await sys.audit.record("KILL_SWITCH_ACTIVATED", f"EMERGENCY KILL SWITCH activated by {actor}: {reason}",
                                    source="KillSwitch", severity="CRITICAL", actor=actor, correlation_id=corr)
             await self._save()
 
-            # 2. cancel pending (non-emergency) orders
-            for o in list(sys.orders.open_orders.values()):
-                if o.origin == "KILL_SWITCH":
-                    continue
-                try:
-                    await sys.orders.cancel(o.order_id, "cancelled by kill switch")
+            # 2. cancel working (non-emergency) orders, all at once
+            pending = [o for o in sys.orders.open_orders.values() if o.origin != "KILL_SWITCH"]
+            results = await asyncio.gather(*(sys.orders.cancel(o.order_id, "cancelled by kill switch") for o in pending),
+                                           return_exceptions=True)
+            for o, r in zip(pending, results):
+                if isinstance(r, Exception):
+                    self.state["cancel_failed"].append({"order_id": o.order_id, "symbol": o.symbol, "error": str(r)})
+                else:
                     self.state["cancelled"].append({"order_id": o.order_id, "symbol": o.symbol, "side": o.side,
                                                     "remaining": o.remaining})
-                except Exception as e:
-                    self.state["cancel_failed"].append({"order_id": o.order_id, "symbol": o.symbol, "error": str(e)})
-            await self._wait_cancels(5.0)
+            await self._wait_cancels(min(CANCEL_WAIT_S, self._left(deadline_s)))
             self.state["phase"] = "CLOSING"
             await self._save()
 
-            # 3. emergency close orders
-            for p in sys.positions.all():
-                if p.quantity == 0:
-                    continue
-                side = "SELL" if p.quantity > 0 else "BUY"
-                intent = OrderIntent(p.strategy_id, p.symbol, side, abs(p.quantity), "MARKET", None, "KILL_SWITCH", True,
-                                     corr, None, None, "emergency flatten")
-                try:
-                    res = await sys.orders.submit(intent)
-                    o = res.get("order") or {}
-                    self.state["close_orders"].append({"strategy_id": p.strategy_id, "symbol": p.symbol, "side": side,
-                                                       "quantity": abs(p.quantity), "order_id": o.get("id"),
-                                                       "status": o.get("status"), "reason": o.get("reject_reason")})
-                except Exception as e:
-                    self.state["close_orders"].append({"strategy_id": p.strategy_id, "symbol": p.symbol, "side": side,
-                                                       "quantity": abs(p.quantity), "order_id": None, "status": "ERROR",
-                                                       "reason": str(e)})
+            # 3. emergency close orders for every open position, all at once
+            await self._close_open_positions(corr)
             self.state["phase"] = "AWAITING_FILLS"
             await self._save()
-        self._task = asyncio.create_task(self._monitor(close_timeout_s))
+        self._task = asyncio.create_task(self._monitor(deadline_s, corr))
         if wait:
             await self._task
         return self.state
+
+    def _left(self, deadline_s: float) -> float:
+        return max(0.0, deadline_s - (time.monotonic() - self._t0))
+
+    async def _close_open_positions(self, corr: str) -> int:
+        """Submit a reduce-only MARKET close for every open position that has no working kill-switch order."""
+        sys = self.sys
+        working = {(o.strategy_id, o.symbol) for o in sys.orders.open_orders.values() if o.origin == "KILL_SWITCH"}
+        now = time.monotonic()
+        todo = [p for p in sys.positions.all() if p.quantity != 0 and (p.strategy_id, p.symbol) not in working
+                and now - self._last_close.get((p.strategy_id, p.symbol), -1e9) >= RECLOSE_GAP_S]
+        for p in todo:
+            self._last_close[(p.strategy_id, p.symbol)] = now
+
+        async def close(p):
+            side = "SELL" if p.quantity > 0 else "BUY"
+            entry = {"strategy_id": p.strategy_id, "symbol": p.symbol, "side": side, "quantity": abs(p.quantity),
+                     "order_id": None, "status": "ERROR", "reason": None,
+                     "at_s": round(time.monotonic() - self._t0, 2)}
+            try:
+                res = await sys.orders.submit(OrderIntent(p.strategy_id, p.symbol, side, abs(p.quantity), "MARKET", None,
+                                                          "KILL_SWITCH", True, corr, None, None, "emergency flatten"))
+                o = res.get("order") or {}
+                entry.update(order_id=o.get("id"), status=o.get("status"), reason=o.get("reject_reason"))
+            except Exception as e:
+                entry["reason"] = str(e)
+            self.state["close_orders"].append(entry)
+
+        await asyncio.gather(*(close(p) for p in todo))
+        return len(todo)
 
     async def _wait_cancels(self, timeout_s: float) -> None:
         loop = asyncio.get_running_loop()
@@ -101,15 +128,17 @@ class KillSwitch:
         while loop.time() < end:
             if not any(o.origin != "KILL_SWITCH" for o in self.sys.orders.open_orders.values()):
                 return
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
-    async def _monitor(self, timeout_s: float) -> None:
-        loop = asyncio.get_running_loop()
-        end = loop.time() + timeout_s
-        while loop.time() < end:
+    async def _monitor(self, deadline_s: float, corr: str) -> None:
+        while self._left(deadline_s) > 0:
             if all(p.quantity == 0 for p in self.sys.positions.all()):
                 break
+            # re-close anything still open without a working close order (partial / rejected / failed close)
+            if await self._close_open_positions(corr):
+                await self._save()
             await asyncio.sleep(0.25)
+        elapsed = round(time.monotonic() - self._t0, 2)
         # refresh close order statuses from the order engine's view
         open_ids = set(self.sys.orders.open_orders)
         for c in self.state["close_orders"]:
@@ -121,12 +150,14 @@ class KillSwitch:
         self.state["unresolved"] = unresolved
         self.state["phase"] = "COMPLETED_WITH_ERRORS" if unresolved or self.state["cancel_failed"] else "COMPLETED"
         self.state["completed_at"] = utcnow().isoformat()
-        corr = self.state.get("correlation_id")
+        self.state["elapsed_s"] = elapsed
+        self.state["within_deadline"] = not unresolved and not self.state["cancel_failed"] and elapsed <= deadline_s
         if unresolved:
-            await self.sys.audit.record("UNRESOLVED_POSITION", f"kill switch could not flatten {len(unresolved)} position(s): "
+            await self.sys.audit.record("UNRESOLVED_POSITION", f"kill switch could not flatten {len(unresolved)} position(s) "
+                                        f"within {deadline_s:g}s: "
                                         + "; ".join(f"{u['strategy_id']} {u['symbol']} {u['quantity']:+}" for u in unresolved),
                                         source="KillSwitch", severity="CRITICAL", correlation_id=corr)
-        await self.sys.audit.record("KILL_SWITCH_COMPLETED", f"kill switch {self.state['phase']}: "
+        await self.sys.audit.record("KILL_SWITCH_COMPLETED", f"kill switch {self.state['phase']} in {elapsed:.2f}s: "
                                     f"{len(self.state['cancelled'])} cancelled, {len(self.state['close_orders'])} close orders, "
                                     f"{len(unresolved)} unresolved", source="KillSwitch", severity="WARN", correlation_id=corr)
         await self._save()

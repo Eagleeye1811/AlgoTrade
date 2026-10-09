@@ -2,18 +2,20 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useSystem } from '../hooks/system'
 import { useApi } from '../hooks/useEvents'
-import { fmtINR, fmtSigned, pnlClass } from '../services/format'
+import { fmtINR, fmtQty, fmtSigned, pnlClass } from '../services/format'
 import MarketChart from '../charts/MarketChart'
 import EventFeed from '../components/EventFeed'
 import Watchlist from '../components/Watchlist'
 import OrdersTable from '../components/OrdersTable'
-import { Empty, Loading, Meter, Panel, Stat, StatusBadge } from '../components/ui'
+import { Empty, Loading, Meter, Panel, Side, Stat, StatusBadge } from '../components/ui'
 
 export default function Dashboard() {
   const { overview } = useSystem()
   const nav = useNavigate()
   const symbols = useApi<any[]>('/market/symbols')
-  const strategies = useApi<any[]>('/strategies', ['strategy.update', 'strategy.status', 'strategy.config', 'position.update', 'strategy.signal'], 1500)
+  const [scope, setScope] = useState<'mine' | 'all'>('mine')
+  const strategies = useApi<any[]>(`/strategies${scope === 'mine' ? '?mine=true' : ''}`,
+    ['strategy.update', 'strategy.status', 'strategy.config', 'position.update', 'strategy.signal', 'pnl.update'], 1000)
   const orders = useApi<any[]>('/orders?limit=8', ['order.update'], 700)
   const risk = useApi<any>('/risk', ['risk.decision', 'pnl.update'], 3000)
   const [chartSym, setChartSym] = useState<string | undefined>(undefined)
@@ -47,19 +49,26 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <Panel title="Strategies" right={<Link to="/strategies" className="text-info text-[11px]">Manage →</Link>}>
-        {!strategies.data ? <Loading /> : (
+      <Panel title={scope === 'mine' ? 'My subscribed strategies · live P&L' : 'All strategies on the account · live P&L'}
+        right={<>
+          <div className="flex overflow-hidden rounded border border-line text-[11px]">
+            {(['mine', 'all'] as const).map((k) => <button key={k} onClick={() => setScope(k)}
+              className={`px-2 py-0.5 ${scope === k ? 'bg-info text-white' : 'text-muted hover:text-text'}`}>{k === 'mine' ? 'Mine' : 'All'}</button>)}
+          </div>
+          <Link to="/strategies" className="text-info text-[11px]">Subscribe / manage →</Link></>}>
+        {!strategies.data ? <Loading /> : strategies.data.length === 0 ? <Empty>No subscriptions yet — <Link className="text-info" to="/strategies">subscribe to a strategy</Link>.</Empty> : (
           <div className="overflow-x-auto"><table className="tbl">
-            <thead><tr><th>Strategy</th><th>Stocks</th><th>Status</th><th>Last signal</th><th>Open positions</th><th className="text-right">Realized</th><th className="text-right">Unrealized</th><th className="text-right">Margin / Alloc</th><th>Last decision</th></tr></thead>
+            <thead><tr><th>Strategy</th><th>Symbol</th><th>Status</th><th>Signal</th><th>Position</th><th className="text-right">P&amp;L today</th><th className="text-right">Realized</th><th className="text-right">Unrealized</th><th className="text-right">Margin / Alloc</th><th>Last decision</th></tr></thead>
             <tbody>{strategies.data.map((s) => (
               <tr key={s.id} className="clickable" onClick={() => nav(`/strategies/${s.id}`)}>
-                <td className="font-medium">{s.name}</td><td>{s.symbols.length}</td><td><StatusBadge status={s.status} /></td>
-                <td>{s.last_signal ? <span className="flex items-center gap-1.5">{s.last_signal.symbol} <StatusBadge status={s.last_signal.signal} /></span> : <span className="text-muted">—</span>}</td>
-                <td className="num">{s.open_positions}</td>
+                <td className="font-medium">{s.name}</td><td>{s.symbol}</td><td><StatusBadge status={s.status} /></td>
+                <td><StatusBadge status={s.current_signal.signal} /></td>
+                <td className="num"><Side side={s.position.side} /> {fmtQty(s.position.quantity)}</td>
+                <td className={`num text-right font-semibold ${pnlClass(s.pnl?.today_pnl)}`}>{fmtSigned(s.pnl?.today_pnl)}</td>
                 <td className={`num text-right ${pnlClass(s.pnl?.realized)}`}>{fmtSigned(s.pnl?.realized)}</td>
                 <td className={`num text-right ${pnlClass(s.pnl?.unrealized)}`}>{fmtSigned(s.pnl?.unrealized)}</td>
                 <td className="num text-right">{fmtINR(s.pnl?.margin_used)} / {fmtINR(s.allocation)}</td>
-                <td className="max-w-[360px] truncate text-muted" title={s.last_signal?.reason}>{s.last_signal ? `${s.last_signal.symbol} ${s.last_signal.signal} → ${s.last_signal.action}: ${s.last_signal.reason}` : 'no actionable signal yet'}</td>
+                <td className="max-w-[360px] truncate text-muted" title={s.last_signal?.reason}>{s.last_signal ? `${s.last_signal.signal} → ${s.last_signal.action}: ${s.last_signal.reason}` : 'no actionable signal yet'}</td>
               </tr>))}</tbody>
           </table></div>
         )}

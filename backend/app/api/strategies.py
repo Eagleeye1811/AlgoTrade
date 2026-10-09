@@ -23,6 +23,24 @@ def _rt(sys: TradingSystem, sid: str):
     return rt
 
 
+def _owned(sys: TradingSystem, sid: str, user: User):
+    """A trader manages only their own subscriptions; an ADMIN manages all."""
+    rt = _rt(sys, sid)
+    if user.role != "ADMIN" and rt.user_id != user.id:
+        raise HTTPException(403, "not your subscription")
+    return rt
+
+
+LIMIT_NAMES = ("max_daily_loss", "max_position", "max_orders_per_min", "max_exposure")
+
+
+def _limits(sys: TradingSystem, sid: str) -> dict:
+    rt = sys.strategies.runtimes.get(sid)
+    out = {n: sys.limits.s(sid, n) for n in LIMIT_NAMES if n != "max_daily_loss"}
+    out["max_daily_loss"] = sys.limits.daily_loss_limit(sid, rt.allocation if rt else Decimal(0))
+    return out
+
+
 def signal_out(x: Signal) -> dict:
     return {"id": str(x.id), "strategy_id": x.strategy_id, "symbol": x.symbol, "signal": x.signal, "price": x.price,
             "candle_time": x.candle_time.isoformat() if x.candle_time else None, "indicators": x.indicators,
@@ -31,8 +49,58 @@ def signal_out(x: Signal) -> dict:
 
 
 @router.get("")
-async def list_strategies(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
-    return [sys.strategies.snapshot(rt) for rt in sys.strategies.runtimes.values()]
+async def list_strategies(mine: bool = False, user: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
+    """All running subscriptions on the account, or only the caller's with ?mine=true."""
+    return [{**sys.strategies.snapshot(rt), "limits": _limits(sys, rt.id)} for rt in sys.strategies.runtimes.values()
+            if not mine or rt.user_id == user.id]
+
+
+@router.get("/catalog")
+async def catalog(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
+    """Strategies a user can subscribe to, with their parameters, plus tradable symbols and free capital."""
+    from app.strategies.registry import REGISTRY
+    return {
+        "strategies": [{"kind": k, "name": c.display_name, "description": c.description,
+                        "param_specs": [p.to_dict() for p in c.param_specs]} for k, c in REGISTRY.items()],
+        "symbols": sys.strategies.symbols(),
+        "unallocated_capital": sys.strategies.unallocated(),
+        "account_configured": sys.account is not None,
+    }
+
+
+class SubscribeIn(BaseModel):
+    kind: str
+    symbol: str
+    quantity: Decimal = Field(gt=0, le=100000)
+    allocation: Decimal = Field(default=Decimal(0), ge=0)  # 0 = allocate later via Configure
+    params: dict[str, float] | None = None
+    max_daily_loss: Decimal | None = Field(default=None, gt=0)
+    max_position: Decimal | None = Field(default=None, gt=0)
+    max_orders_per_min: Decimal | None = Field(default=None, gt=0, le=600)
+
+
+@router.post("")
+async def subscribe(body: SubscribeIn, user: User = Depends(require_trader), sys: TradingSystem = Depends(get_system)):
+    try:
+        rt = await sys.strategies.subscribe(user.id, body.kind, body.symbol, body.quantity, body.allocation,
+                                            body.params, actor(user))
+        for name in ("max_daily_loss", "max_position", "max_orders_per_min"):
+            v = getattr(body, name)
+            if v is not None:
+                await sys.limits.set("STRATEGY", rt.id, name, v, user.id)
+    except ValueError as e:
+        raise bad_request(e)
+    return {**sys.strategies.snapshot(rt), "limits": _limits(sys, rt.id)}
+
+
+@router.delete("/{sid}")
+async def unsubscribe(sid: str, user: User = Depends(require_trader), sys: TradingSystem = Depends(get_system)):
+    _owned(sys, sid, user)
+    try:
+        await sys.strategies.unsubscribe(sid, actor(user))
+    except ValueError as e:
+        raise bad_request(e)
+    return {"ok": True}
 
 
 @router.get("/{sid}")
@@ -43,20 +111,18 @@ async def detail(sid: str, _: User = Depends(current_user), sys: TradingSystem =
         orders = (await s.execute(select(Order).where(Order.strategy_id == sid).order_by(Order.created_at.desc()).limit(30))).scalars().all()
         cfgs = (await s.execute(select(StrategyConfig).where(StrategyConfig.strategy_id == sid)
                                 .order_by(StrategyConfig.version.desc()))).scalars().all()
-    return {**sys.strategies.snapshot(rt), "limits": {n: sys.limits.s(sid, n) for n in ("max_position", "max_orders_per_min", "max_exposure")},
+    return {**sys.strategies.snapshot(rt), "limits": _limits(sys, sid),
             "signals": [signal_out(x) for x in sigs], "orders": [order_to_dict(o) for o in orders],
             "config_history": [{"version": c.version, "params": c.params, "active": c.is_active,
                                 "created_at": c.created_at.isoformat()} for c in cfgs]}
 
 
 @router.get("/{sid}/chart")
-async def chart(sid: str, limit: int = Query(300, le=600), symbol: str | None = None, _: User = Depends(current_user),
+async def chart(sid: str, limit: int = Query(300, le=600), _: User = Depends(current_user),
                 sys: TradingSystem = Depends(get_system)):
     rt = _rt(sys, sid)
-    sym = (symbol or rt.symbol).upper()
-    inst = rt.instances.get(sym)
-    if inst is None:
-        raise HTTPException(404, f"{rt.name} does not trade {sym}")
+    sym = rt.symbol
+    inst = rt.instance
     bars = inst.bars[-limit:]
     since = bars[0].ts if bars else None
     series: dict[str, Any] = inst.series()
@@ -81,14 +147,14 @@ async def chart(sid: str, limit: int = Query(300, le=600), symbol: str | None = 
 
 @router.post("/{sid}/pause")
 async def pause(sid: str, user: User = Depends(require_trader), sys: TradingSystem = Depends(get_system)):
-    _rt(sys, sid)
+    _owned(sys, sid, user)
     await sys.strategies.set_status(sid, "PAUSED", f"paused by {user.email}", actor=actor(user))
     return sys.strategies.snapshot(sys.strategies.runtimes[sid])
 
 
 @router.post("/{sid}/resume")
 async def resume(sid: str, user: User = Depends(require_trader), sys: TradingSystem = Depends(get_system)):
-    _rt(sys, sid)
+    _owned(sys, sid, user)
     if sys.controller.status == "SAFE_MODE":
         raise HTTPException(400, "system is in SAFE MODE")
     await sys.strategies.set_status(sid, "RUNNING", None, actor=actor(user))
@@ -103,7 +169,7 @@ class ConfigIn(BaseModel):
 
 @router.put("/{sid}/config")
 async def configure(sid: str, body: ConfigIn, user: User = Depends(require_trader), sys: TradingSystem = Depends(get_system)):
-    _rt(sys, sid)
+    _owned(sys, sid, user)
     if body.quantity is not None and body.quantity != body.quantity.to_integral_value():
         raise HTTPException(400, "quantity must be a whole number of shares")
     try:

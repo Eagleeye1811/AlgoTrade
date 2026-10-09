@@ -1,7 +1,7 @@
 """Deterministic Demo Mode.
 
-Drives the REAL engine through the judge script. Nothing here writes UI values: it starts the real
-replay feed, starts trading, waits for real strategy orders/fills, then runs real fault scenarios
+Drives the REAL engine through the judge script. Nothing here writes UI values: it uses the live 021 market
+feed (NSE hours), starts trading, waits for real strategy orders/fills, then runs real fault scenarios
 and finally the real kill switch. Pause/resume take effect between steps.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ WIPE_TABLES = ["order_events", "position_events", "fills", "orders", "signals", 
                "risk_events", "reconciliation_events", "fault_simulations", "system_events"]
 
 STEPS = [
-    ("market", "Live/replay market data", "Real NSE 1m bars stream through the candle engine"),
+    ("market", "Live market data", "021 market-data ticks stream through the candle engine (NSE hours)"),
     ("trading", "Start algorithmic trading", "Global trading RUNNING, all strategies enabled"),
     ("first_fill", "Strategy signal -> risk -> order -> fill", "Wait for a strategy to trade on real candles"),
     ("pnl", "Position & P&L update", "Position and P&L computed from the actual fill"),
@@ -101,25 +101,31 @@ class DemoMode:
         await self._publish()
 
     async def reset(self, actor: str) -> dict[str, Any]:
-        """Wipe trading history (internal + paper broker) and rewind the replay. Destructive, ADMIN only."""
+        """Wipe the platform's trading history (and the simulator's, in paper mode). Destructive, ADMIN only."""
         if self.task and not self.task.done():
             self.task.cancel()
         self._go.set()
         sys = self.sys
         if sys.account is None:
             raise ValueError("trading account not configured")
+        if not sys.is_paper:  # a real venue cannot be wiped: only reset while the 021 account is flat
+            open_pos = [p for p in await sys.broker.adapter.get_positions() if p.quantity != 0]
+            if open_pos or sys.orders.open_orders:
+                raise ValueError("the 021 account must be flat with no working orders before a demo reset "
+                                 "(use the kill switch first): " + ", ".join(f"{p.symbol} {p.quantity:+}" for p in open_pos))
         await sys.stop_engine()
         async with sys.db.transaction() as s:
             await s.execute(text("TRUNCATE " + ", ".join(WIPE_TABLES) + " RESTART IDENTITY CASCADE"))
-            await s.execute(text("DELETE FROM system_state WHERE key IN ('kill_switch','replay_cursor')"))
+            await s.execute(text("DELETE FROM system_state WHERE key = 'kill_switch'"))
             await s.execute(text("UPDATE strategies SET status='RUNNING', status_reason=NULL"))
-        await sys.broker.adapter.reset_account(sys.account.broker_account_id, sys.account.starting_capital)
+        if sys.is_paper:
+            await sys.broker.adapter.reset_account(sys.account.broker_account_id, sys.account.starting_capital)
         await sys.redis.reset_window("")
         sys.risk.recent_identical.clear()
         self.steps, self.status, self.run_id = [], "IDLE", None
         await sys.controller.set_status(PAUSED, "demo reset", actor=actor)
         await sys.start_engine(trigger="DEMO_RESET")
-        await sys.audit.record("DEMO_RESET", f"demo reset by {actor}: trading history wiped, replay rewound",
+        await sys.audit.record("DEMO_RESET", f"demo reset by {actor}: trading history wiped",
                                source="DemoMode", severity="WARN", actor=actor)
         await self._publish()
         return self.snapshot()
@@ -132,11 +138,7 @@ class DemoMode:
             # 1. market data
             await self._gate()
             md = sys.market
-            if md.provider is None or not md.provider.running:
-                await md.restart_replay(from_start=False)
-            self._prev_speed = getattr(md.provider, "speed", None)
-            md.set_speed(60)  # demo runs accelerated; real-time speed is restored afterwards
-            ok = await wait_until(lambda: md.display_status() in ("LIVE", "REPLAY", "DELAYED"), 15)
+            ok = await wait_until(lambda: md.display_status() in ("LIVE", "REPLAY"), 15)
             await self._mark("market", "done" if ok else "failed",
                              f"{md.display_status()} - {md.provider.source_name if md.provider else ''}",
                              {"ltp": {k: float(v[0].price) for k, v in md.last.items()}})
@@ -154,10 +156,11 @@ class DemoMode:
             n0 = sys.orders.stats["filled"]
             got = await wait_until(lambda: sys.orders.stats["filled"] > n0, 90, 0.5)
             if not got:
-                rt = sys.strategies.runtimes["macd"]
+                sid = "macd" if "macd" in sys.strategies.runtimes else next(iter(sys.strategies.runtimes))
+                rt = sys.strategies.runtimes[sid]
                 await self._mark("first_fill", "running", "no natural signal within 90s - injecting a clearly labelled "
                                  "DEMO signal through the same pipeline")
-                await sys.strategies.handle_signal("macd", "BUY", "DEMO-injected signal (no natural crossover in window)",
+                await sys.strategies.handle_signal(sid, "BUY", "DEMO-injected signal (no natural crossover in window)",
                                                    {"demo": True}, origin="DEMO", quantity=rt.quantity)
                 got = await wait_until(lambda: sys.orders.stats["filled"] > n0, 20, 0.5)
             orders = await sys.recent_orders(5)
@@ -203,6 +206,4 @@ class DemoMode:
         finally:
             if sys.market.provider and sys.market.provider.paused:
                 sys.market.provider.resume()
-            if getattr(self, "_prev_speed", None):
-                sys.market.set_speed(self._prev_speed)
             await self._publish()

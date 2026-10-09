@@ -18,18 +18,36 @@ export default function Faults() {
   useEvents(['demo.update'], (e) => demo.setData(e.payload))
   const [live, setLive] = useState<LiveRun | null>(null)
   const [chaos, setChaos] = useState<any>(null)
-  const [strategy, setStrategy] = useState('macd')
+  const strategies = useApi<any[]>('/strategies', ['strategy.status'], 2000)
+  // each scenario has its own target strategy (defaults to the first running one)
+  const [targets, setTargets] = useState<Record<string, string>>({})
+  const firstRunning = strategies.data?.find((x: any) => x.status === 'RUNNING')?.id || strategies.data?.[0]?.id || ''
+  const targetFor = (key: string) => targets[key] || firstRunning
   const [err, setErr] = useState<string | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
   const [openRun, setOpenRun] = useState<string | null>(null)
   useEvents(['fault.step'], (e) => setLive((r) => {
     const p = e.payload
-    if (!r || r.run_id !== p.run_id) return { run_id: p.run_id, scenario: p.scenario, steps: [p.step], status: 'RUNNING' }
+    if (!r || (r.run_id && r.run_id !== p.run_id)) return { run_id: p.run_id, scenario: p.scenario, steps: [p.step], status: 'RUNNING' }
+    if (!r.run_id) return { ...r, run_id: p.run_id, steps: [...r.steps, p.step] }
     return { ...r, steps: [...r.steps, p.step] }
   }))
   useEvents(['fault.completed'], (e) => setLive((r) => (r && r.run_id === e.payload.run_id ? { ...r, status: e.payload.status, outcome: e.payload.outcome, steps: e.payload.steps } : r)))
   useEvents(['chaos.started', 'chaos.progress', 'chaos.completed'], (e) => setChaos({ ...e.payload, phase: e.event_type }))
   useEffect(() => { if (!live && runs.data?.length) { const r = runs.data[0]; setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome }) } }, [runs.data, live])
+  // latest run per scenario, for the result shown on each card
+  const lastRun: Record<string, any> = {}
+  for (const r of runs.data || []) if (!lastRun[r.scenario]) lastRun[r.scenario] = r
+  const show = (r: any) => {
+    setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome })
+    document.getElementById('fault-timeline')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const inject = async (key: string) => {
+    setLive({ run_id: '', scenario: key, steps: [], status: 'RUNNING' })
+    document.getElementById('fault-timeline')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    await call(`/faults/run/${key}`, { strategy_id: targetFor(key) })
+    runs.reload()
+  }
 
   const call = async (path: string, body?: any) => { setErr(null); try { await api.post(path, body); sc.reload(); demo.reload() } catch (e: any) { setErr(e.message) } }
   const busy = !!sc.data?.active || sc.data?.chaos_running
@@ -38,7 +56,7 @@ export default function Faults() {
   return (
     <div className="space-y-3">
       <h1 className="text-base font-semibold">Fault Simulation &amp; Recovery Lab</h1>
-      <div className="text-xs text-muted">Every scenario injects a real fault into a real component (paper broker transport, market feed, strategy logic, internal state) and the timeline is built from what the engine actually did.
+      <div className="text-xs text-muted">Every scenario injects a real fault into a real component (021 broker adapter boundary, market feed, strategy logic, internal state) and the timeline is built from what the engine actually did.
         Test orders go through the full Signal → Risk → Order → Broker path, so trading must be <b>RUNNING</b> {trading && <>— currently <StatusBadge status={trading.status} /></>}.</div>
       <ErrorText error={err} />
 
@@ -64,18 +82,39 @@ export default function Faults() {
         )}
       </Panel>
 
-      <Panel title="Inject a fault" right={<>
-        <span className="text-[11px] text-muted">Target strategy</span>
-        <select className="input" value={strategy} onChange={(e) => setStrategy(e.target.value)}><option value="rsi_ema">RSI + EMA</option><option value="macd">MACD</option><option value="breakout">Breakout</option></select>
-        <button className="btn btn-primary" disabled={busy} onClick={() => call('/faults/chaos')}>Run automated chaos mode</button></>} bodyClass="p-3">
+      <Panel title="Inject a fault" right={<button className="btn btn-primary" disabled={busy} onClick={() => call('/faults/chaos')}>Run automated chaos mode</button>} bodyClass="p-3">
         {!sc.data ? <Loading /> : (
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            {sc.data.scenarios.map((s: any) => (
-              <div key={s.key} className="flex flex-col justify-between gap-2 rounded border border-line bg-panel2 p-2.5 text-xs">
-                <div><div className="font-semibold text-white">{s.title}</div><div className="text-muted">{s.description}</div></div>
-                <button className="btn self-start" disabled={busy} onClick={() => call(`/faults/run/${s.key}`, { strategy_id: strategy })}>{sc.data.active?.scenario === s.key ? 'Running…' : 'Inject'}</button>
-              </div>
-            ))}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {sc.data.scenarios.map((s: any) => {
+              const r = lastRun[s.key]
+              const running = sc.data.active?.scenario === s.key
+              return (
+                <div key={s.key} className={`flex flex-col gap-2 rounded border bg-panel2 p-3 text-xs ${running ? 'border-blue-500/60' : 'border-line'}`}>
+                  <div>
+                    <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold text-white">{s.title}</span>
+                      {running ? <StatusBadge status="running" label="RUNNING" /> : r && <StatusBadge status={r.status} />}</div>
+                    <div className="mt-0.5 text-muted">{s.description}</div>
+                  </div>
+                  <label className="text-[11px] text-muted">Target strategy
+                    <select className="input mt-0.5 w-full" value={targetFor(s.key)} disabled={s.available === false}
+                      onChange={(e) => setTargets({ ...targets, [s.key]: e.target.value })}>
+                      {(strategies.data || []).map((x: any) => <option key={x.id} value={x.id}>{x.name} · {x.symbol} · {x.status}</option>)}
+                    </select></label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button className="btn btn-primary" disabled={busy || s.available === false || !targetFor(s.key)}
+                      title={s.available === false ? 'Needs the local simulator: a real exchange cannot be forced to do this' : undefined}
+                      onClick={() => inject(s.key)}>{s.available === false ? 'Simulator only' : running ? 'Running…' : 'Inject'}</button>
+                    {r && <button className="btn" onClick={() => show(r)}>View timeline</button>}
+                  </div>
+                  {r && (
+                    <div className="rounded border border-line bg-bg p-2">
+                      <div className="flex items-center justify-between text-[10px] text-muted"><span>Last run · {fmtTime(r.started_at, true)}</span><span>{r.triggered_by}</span></div>
+                      <div className="mt-0.5 whitespace-pre-wrap break-words">{r.outcome || '—'}</div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         )}
         {chaos && (
@@ -89,12 +128,19 @@ export default function Faults() {
         )}
       </Panel>
 
-      <Panel title={live ? `Live timeline · ${titles[live.scenario] || live.scenario}` : 'Live timeline'} right={live && <StatusBadge status={live.status} />} bodyClass="p-3 space-y-2">
-        {!live ? <Empty>Inject a fault to see FAULT INJECTED → SYSTEM RESPONSE → RECOVERY ACTION → FINAL STATE</Empty> : <>
-          <FaultTimeline steps={live.steps} />
-          {live.outcome && <div className="text-xs"><span className="text-muted">Outcome:</span> {live.outcome}</div>}
-        </>}
-      </Panel>
+      <div id="fault-timeline" className="scroll-mt-4">
+        <Panel title={live ? `Timeline · ${titles[live.scenario] || live.scenario}` : 'Timeline'} right={live && <StatusBadge status={live.status} />} bodyClass="p-3 space-y-3">
+          {!live ? <Empty>Inject a fault to see FAULT INJECTED → SYSTEM RESPONSE → RECOVERY ACTION → FINAL STATE</Empty> : <>
+            {live.steps.length === 0 ? <div className="text-xs text-muted">Starting…</div> : <FaultTimeline steps={live.steps} />}
+            {live.outcome && (
+              <div className={`rounded border p-2.5 text-xs ${live.status === 'COMPLETED' ? 'border-green-500/40 bg-green-500/5' : 'border-amber-500/40 bg-amber-500/5'}`}>
+                <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Outcome</div>
+                <div className="whitespace-pre-wrap break-words">{live.outcome}</div>
+              </div>
+            )}
+          </>}
+        </Panel>
+      </div>
 
       <Panel title="Run history">
         {!runs.data ? <Loading /> : runs.data.length === 0 ? <Empty>No fault runs yet</Empty> : (
@@ -112,7 +158,7 @@ export default function Faults() {
 
       <Modal open={resetOpen} onClose={() => setResetOpen(false)} title="Reset demo"
         footer={<><button className="btn" onClick={() => setResetOpen(false)}>Cancel</button><button className="btn btn-danger" onClick={async () => { setResetOpen(false); await call('/demo/reset') }}>Wipe & reset</button></>}>
-        <p className="text-sm">This permanently deletes all orders, fills, positions, signals, risk/reconciliation events, fault runs and the audit trail, resets the paper broker account to its starting capital and rewinds the market replay.</p>
+        <p className="text-sm">This permanently deletes all orders, fills, positions, signals, risk/reconciliation events, fault runs and the audit trail, and the platform's own trading history. The 021 account must be flat first (its orders stay in 021's order book).</p>
         <p className="text-xs text-muted">Users, strategies, configurations and risk limits are kept. Trading will be PAUSED afterwards.</p>
       </Modal>
     </div>

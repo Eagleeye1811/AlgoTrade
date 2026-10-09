@@ -21,9 +21,10 @@ def account_view(sys: TradingSystem) -> dict:
         "account": None if a is None else {
             "id": a.id, "name": a.name, "account_type": a.account_type, "broker": a.broker,
             "broker_account_id": a.broker_account_id, "starting_capital": a.starting_capital, "created_at": a.created_at},
-        "execution_mode": "PAPER TRADING - SIMULATED EXECUTION",
-        "broker_note": "No verified 021 API documentation or credentials are configured; orders execute on the "
-                       "AlgoTrade Paper Broker Simulator. No real money is traded.",
+        "execution_mode": "LOCAL SIMULATOR (tests)" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
+        "broker_note": ("Orders execute on the local simulator (automated tests)." if sys.is_paper else
+                        "Orders go to the 021 developer sandbox (POST /orders): virtual funds on a simulated exchange. "
+                        "No real money is traded."),
         "portfolio": snap["portfolio"],
         "allocations": {sid: {"name": rt.name, "allocation": rt.allocation} for sid, rt in sys.strategies.runtimes.items()},
         "broker": sys.broker.info(),
@@ -65,7 +66,7 @@ async def overview(_: User = Depends(current_user), sys: TradingSystem = Depends
         "kill_switch": sys.kill_switch.snapshot(),
         "reconciliation": {"status": sys.reconciler.status, "last": sys.reconciler.last},
         "account_configured": sys.account is not None,
-        "execution_mode": "PAPER TRADING - SIMULATED EXECUTION",
+        "execution_mode": "LOCAL SIMULATOR (tests)" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
     }
 
 

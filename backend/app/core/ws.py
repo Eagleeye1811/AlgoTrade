@@ -72,14 +72,6 @@ class WSManager:
                 log.warning("redis subscription lost: %s - retrying", e)
                 await asyncio.sleep(2)
 
-    def focus_symbols(self) -> list[str]:
-        """Symbols currently open in a chart on any connected client (they asked for its candle updates)."""
-        out: set[str] = set()
-        for c in self.clients:
-            if c.symbols:
-                out |= c.symbols
-        return sorted(out)
-
     async def broadcast(self, data: str, event_type: str, symbol: str | None, event_id: str | None) -> None:
         if event_id:
             if event_id in self._seen:

@@ -1,202 +1,115 @@
-"""MarketDataService: selects the provider, feeds the Candle Engine, tracks freshness, fans out ticks."""
+"""MarketDataService: runs the provider, feeds the Candle Engine, tracks freshness, fans out ticks.
+
+Modes: "o21" (021 market-data websocket, the only runtime source) and "manual" (automated tests).
+021 has no candle-history endpoint, so every candle the platform builds is persisted (market_bars, source
+"ticks") and the last days are reloaded at startup to warm indicators.
+"""
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.core.events import Event
 from app.core.health import FAILED, HEALTHY, WARNING
+from app.database.models import MarketBar
 from app.market.candle_engine import CandleEngine
 from app.market.models import DELAYED, DISCONNECTED, LIVE, REPLAY, STALE, STOPPED, Bar, Tick
-from app.market.providers import LiveYahooProvider, ManualProvider, MarketDataProvider, ReplayProvider, nse_market_open
-from app.market.yahoo import MarketDataError, YahooChartClient
+from app.market.providers import DayStats, ManualProvider, MarketDataProvider, O21MarketProvider, nse_market_open
 
 if TYPE_CHECKING:
     from app.engine.system import TradingSystem
 
 log = logging.getLogger("algotrade.market.service")
+TICK_PUSH_GAP_S = 0.25  # max 4 market.tick pushes per second per symbol
+HISTORY_DAYS = 3
+CLOSE_GRACE_S = 3.0  # a candle is closed by the clock this long after its period ends (late ticks still count)
 
 
 class MarketDataService:
     def __init__(self, system: "TradingSystem"):
         self.sys = system
-        s = system.settings
-        self.settings = s
-        self.client = YahooChartClient(s.yahoo_base_url, s.yahoo_timeout_s)
+        self.settings = system.settings
         self.candles = CandleEngine()
         self.provider: MarketDataProvider | None = None
         self.last: dict[str, tuple[Tick, float]] = {}
         self.tick_listeners: list[Callable[[Tick], Awaitable[None]]] = []
         self._last_tick_push: dict[str, float] = {}
+        self._tick_trailing: dict[str, asyncio.Task] = {}
         self._last_status: str | None = None
         self._watchdog: asyncio.Task | None = None
         self.candles.on_update = self._on_candle_update
-        # automatic NSE session switching (only when market_data_mode == "auto")
-        self.is_market_open: Callable[[], bool] = nse_market_open  # injectable clock for tests
-        self.session_check_interval_s = 30.0
-        self.override: str | None = None  # operator-forced mode, honoured until the next session boundary
-        self._last_desired: str | None = None
-        self._switch_lock = asyncio.Lock()
-        self._scheduler: asyncio.Task | None = None
-        self.last_switch: dict | None = None
+        self.candles.on_closed.append(self._persist)
+        self.is_market_open: Callable[[], bool] = nse_market_open
 
     # ------------------------------------------------------------------ lifecycle
-    @property
-    def auto(self) -> bool:
-        return self.settings.market_data_mode.lower() == "auto"
-
-    def _desired_mode(self) -> str:
-        """Mode the clock asks for: live during NSE hours, otherwise replay of real past sessions."""
-        return "live" if self.is_market_open() else "replay"
-
-    def _choose_mode(self) -> str:
-        if self.auto:
-            return self.override or self._desired_mode()
-        return self.settings.market_data_mode.lower()
-
-    async def _make_provider(self, mode: str) -> MarketDataProvider:
+    def _make_provider(self) -> MarketDataProvider:
         syms = self.settings.symbol_list
-        if mode == "live":
-            prov = LiveYahooProvider(syms, self.client, self.settings.live_poll_interval_s,
-                                     self.settings.live_focus_poll_interval_s)
-            prov.focus = self.sys.ws.focus_symbols
-            return prov
-        if mode == "manual":
+        if self.settings.market_data_mode.lower() == "manual":
             return ManualProvider(syms)
-        prov = ReplayProvider(syms, self.sys.db, self.client, self.settings.replay_data_dir,
-                              self.settings.replay_speed, self.settings.replay_warmup_bars)
-        await prov.load()
-        cursor = await self.sys.state.get("replay_cursor")
-        prov.set_cursor(int(cursor) if cursor is not None else prov.warmup_bars)
-        prov.on_cursor = self._on_cursor
-        return prov
+        return O21MarketProvider(syms, self.sys.o21, self.sys.instruments, self.settings.o21_ws_market_url,
+                                 self.settings.o21_sandbox_stream_after_s)
 
-    async def start(self, mode: str | None = None) -> None:
-        mode = mode or self._choose_mode()
-        prov = await self._make_provider(mode)
+    async def start(self) -> None:
+        prov = self._make_provider()
         prov.on_tick = self._on_tick
         prov.on_bar_close = self._on_bar_close
         prov.on_status = self._on_status
         self.provider = prov
         self.last.clear()
         self.candles.reset()
+        history = await self._history(prov.symbols)
         for sym in prov.symbols:
-            try:
-                self.candles.seed(sym, await prov.history(sym))
-            except MarketDataError as e:
-                self.sys.health.error("market_data", f"history for {sym} failed: {e}", WARNING)
+            self.candles.seed(sym, history.get(sym, []))
+        if isinstance(prov, O21MarketProvider):
+            prov.seed_newest({sym: bars[-1].ts for sym, bars in history.items() if bars})
         await prov.start()
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._watch(), name="market-watchdog")
-        if self.auto:
-            if self._last_desired is None:
-                self._last_desired = self._desired_mode()
-            if self._scheduler is None or self._scheduler.done():
-                self._scheduler = asyncio.create_task(self._session_loop(), name="market-session-scheduler")
-        await self.sys.audit.record("MARKET_DATA_STARTED", f"market data started in {prov.mode} mode: {prov.source_name}",
+        await self.sys.audit.record("MARKET_DATA_STARTED", f"market data started ({prov.mode}): {prov.source_name}",
                                     source="MarketDataProvider", payload={"mode": prov.mode, "symbols": prov.symbols})
-
-    # ------------------------------------------------------------------ automatic session switching
-    async def _session_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self.session_check_interval_s)
-            try:
-                await self.check_session()
-            except Exception as e:
-                log.exception("session check failed")
-                self.sys.health.error("market_data", f"session switch failed: {e}")
-
-    async def check_session(self) -> str | None:
-        """One scheduler tick. Switches LIVE <-> REPLAY when the NSE session opens/closes. Returns new mode or None."""
-        if not self.auto or self.provider is None:
-            return None
-        desired = self._desired_mode()
-        if desired != self._last_desired:
-            boundary = "NSE session opened" if desired == "live" else "NSE session closed"
-            if self.override:
-                await self.sys.audit.record("MARKET_OVERRIDE_CLEARED", f"{boundary}: operator override "
-                                            f"'{self.override}' cleared", source="MarketDataProvider")
-            self.override = None
-            self._last_desired = desired
-        target = self.override or desired
-        if self.provider.mode.lower() == target:
-            return None
-        await self.switch_to(target, "NSE session opened" if target == "live" else "NSE session closed")
-        return target
-
-    async def switch_to(self, mode: str, reason: str) -> None:
-        """Safe feed switch: block orders, cancel orders priced on the old feed, swap provider,
-        re-warm strategies, reconcile, unblock. The provider swap never happens with orders allowed."""
-        sys = self.sys
-        async with self._switch_lock:
-            old = self.provider.mode if self.provider else None
-            await sys.controller.block("market_switch", f"switching market data {old} -> {mode.upper()} ({reason})")
-            try:
-                cancelled = []
-                for o in list(sys.orders.open_orders.values()):
-                    if o.origin == "KILL_SWITCH":
-                        continue
-                    try:
-                        await sys.orders.cancel(o.order_id, f"cancelled: market data switching {old} -> {mode.upper()}")
-                        cancelled.append(o.order_id[:8])
-                    except Exception as e:
-                        log.warning("could not cancel %s before feed switch: %s", o.order_id, e)
-                if self.provider:
-                    await self.provider.stop()
-                await self.start(mode)
-                await sys.strategies.reinitialize_all()
-                open_pos = [f"{p.strategy_id} {p.symbol} {p.quantity:+}" for p in sys.positions.all() if p.quantity]
-                self.last_switch = {"from": old, "to": self.provider.mode, "reason": reason,
-                                    "cancelled_orders": cancelled, "carried_positions": open_pos}
-                await sys.audit.record(
-                    "MARKET_DATA_SWITCHED",
-                    f"market data {old} -> {self.provider.mode} ({reason}); {len(cancelled)} open order(s) cancelled"
-                    + (f"; positions carried over and now marked at {self.provider.mode} prices: {', '.join(open_pos)}"
-                       if open_pos else ""),
-                    source="MarketDataProvider", severity="WARN", payload=self.last_switch)
-                if sys.account is not None:
-                    await sys.reconciler.run("MARKET_SESSION_SWITCH")
-            finally:
-                await sys.controller.unblock("market_switch", f"- now {self.provider.mode if self.provider else '?'}")
-            await sys.bus.publish(Event("market.status", "MarketDataProvider", payload=self.info()))
 
     async def stop(self) -> None:
         if self._watchdog:
             self._watchdog.cancel()
             self._watchdog = None
-        if self._scheduler and self._scheduler is not asyncio.current_task():
-            self._scheduler.cancel()
-            self._scheduler = None
         if self.provider:
             await self.provider.stop()
         self.candles.cancel_pending()
+        for t in list(self._tick_trailing.values()):
+            t.cancel()
+        self._tick_trailing.clear()
 
     async def close(self) -> None:
         await self.stop()
-        await self.client.close()
 
-    async def restart_replay(self, from_start: bool = True) -> None:
-        if self.auto and self._desired_mode() == "live":
-            # operator explicitly wants replay during market hours: honour it until the session closes
-            self.override = "replay"
-        if self.provider:
-            await self.provider.stop()
-        if from_start:
-            await self.sys.state.set("replay_cursor", None)
-        self.last.clear()
-        await self.start("replay")
-        await self.sys.strategies.reinitialize_all()
+    # ------------------------------------------------------------------ candle persistence (our own history)
+    async def _history(self, symbols: list[str]) -> dict[str, list[Bar]]:
+        since = datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)
+        async with self.sys.db.session() as s:
+            rows = (await s.execute(select(MarketBar).where(MarketBar.symbol.in_(symbols), MarketBar.interval == "1m",
+                                                            MarketBar.ts >= since).order_by(MarketBar.ts))).scalars().all()
+        out: dict[str, list[Bar]] = {}
+        for r in rows:
+            out.setdefault(r.symbol, []).append(Bar(r.symbol, r.ts, r.open, r.high, r.low, r.close, r.volume))
+        return out
 
-    def set_speed(self, speed: float) -> None:
-        if isinstance(self.provider, ReplayProvider):
-            self.provider.speed = max(1.0, min(speed, 600.0))
-
-    async def _on_cursor(self, cursor: int) -> None:
-        if cursor % 5 == 0:
-            await self.sys.state.set("replay_cursor", cursor)
+    async def _persist(self, symbol: str, tf: str, bar: Bar) -> None:
+        if tf != "1m" or isinstance(self.provider, ManualProvider):
+            return
+        try:
+            async with self.sys.db.transaction() as s:
+                await s.execute(pg_insert(MarketBar).values(symbol=symbol, interval="1m", ts=bar.ts, open=bar.open,
+                                                            high=bar.high, low=bar.low, close=bar.close,
+                                                            volume=bar.volume, source="ticks").on_conflict_do_nothing())
+        except Exception as e:  # never let persistence break the data path
+            log.warning("could not persist candle %s %s: %s", symbol, bar.ts, e)
 
     # ------------------------------------------------------------------ data path
     async def _on_tick(self, tick: Tick) -> None:
@@ -207,15 +120,42 @@ class MarketDataService:
                 await listener(tick)
             except Exception:
                 log.exception("tick listener failed")
-        now = time.monotonic()
-        if now - self._last_tick_push.get(tick.symbol, 0) >= 0.25:
-            self._last_tick_push[tick.symbol] = now
-            await self.sys.redis.set_json(f"ltp:{tick.symbol}", {"price": tick.price, "ts": tick.ts}, ttl_s=300)
-            await self.sys.bus.publish(Event("market.tick", "MarketDataProvider", symbol=tick.symbol, payload={
-                "price": float(tick.price), "market_ts": tick.ts.isoformat(), "source": tick.source}))
+        wait = TICK_PUSH_GAP_S - (time.monotonic() - self._last_tick_push.get(tick.symbol, 0))
+        if wait <= 0:
+            await self._push_tick(tick.symbol)
+        elif tick.symbol not in self._tick_trailing:
+            # throttle UI pushes, but always publish the latest price of a burst
+            self._tick_trailing[tick.symbol] = asyncio.create_task(self._push_tick_later(tick.symbol, wait))
+
+    async def _push_tick(self, symbol: str) -> None:
+        entry = self.last.get(symbol)
+        if entry is None:
+            return
+        tick = entry[0]
+        self._last_tick_push[symbol] = time.monotonic()
+        await self.sys.redis.set_json(f"ltp:{symbol}", {"price": tick.price, "ts": tick.ts}, ttl_s=300)
+        await self.sys.bus.publish(Event("market.tick", "MarketDataProvider", symbol=symbol, payload={
+            "price": float(tick.price), "market_ts": tick.ts.isoformat(), "source": tick.source}))
+
+    async def _push_tick_later(self, symbol: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            self._tick_trailing.pop(symbol, None)
+        await self._push_tick(symbol)
 
     async def _on_bar_close(self, symbol: str, ts) -> None:
         await self.candles.close_minute(symbol, ts)
+
+    async def close_due_candles(self, now: datetime | None = None) -> None:
+        """Live feed: close candles whose period is over even if no tick of the next period arrived (a quiet
+        stock would otherwise hold its candle - and the strategies - open)."""
+        now = now or datetime.now(timezone.utc)
+        for (sym, tf), w in list(self.candles.working.items()):
+            span = timedelta(minutes=1 if tf == "1m" else 5)
+            if now >= w.ts + span + timedelta(seconds=CLOSE_GRACE_S):
+                # close_minute closes the 1m candle, and the 5m candle when called with its last minute
+                await self.candles.close_minute(sym, w.ts if tf == "1m" else w.ts + timedelta(minutes=4))
 
     async def _on_candle_update(self, symbol: str, tf: str, bar: Bar) -> None:
         await self.sys.bus.publish(Event("candle.update", "CandleEngine", symbol=symbol,
@@ -228,14 +168,24 @@ class MarketDataService:
         if status == DISCONNECTED:
             await self.sys.on_component_failure("market_data", detail)
 
-    # ------------------------------------------------------------------ freshness / status
+    # ------------------------------------------------------------------ session values / freshness / status
+    def now(self) -> datetime:
+        """Market time: the test feed's clock in manual mode, the wall clock otherwise."""
+        if isinstance(self.provider, ManualProvider):
+            return self.provider.clock
+        return datetime.now(timezone.utc)
+
+    def day(self, symbol: str) -> DayStats:
+        return self.provider.day.get(symbol, DayStats()) if self.provider else DayStats()
+
+    def session_open(self, symbol: str) -> Decimal | None:
+        """Today's open from the exchange (021 full packet)."""
+        return self.day(symbol).open
+
     @property
     def stale_after(self) -> float:
-        if isinstance(self.provider, ReplayProvider):
-            # several missed ticks in a row = stale
-            return max(self.settings.stale_after_s_replay, 5 * self.provider.step_s)
         if isinstance(self.provider, ManualProvider):
-            return self.settings.stale_after_s_replay
+            return self.settings.stale_after_s_manual
         return self.settings.stale_after_s_live
 
     def ltp(self, symbol: str) -> Decimal | None:
@@ -274,35 +224,27 @@ class MarketDataService:
         d["display_status"] = self.display_status()
         d["symbols"] = p.symbols if p else []
         d["market_open"] = self.is_market_open()
-        d["auto_switching"] = self.auto
-        d["override"] = self.override
-        d["last_switch"] = self.last_switch
         d["stale_after_s"] = round(self.stale_after, 1)
         d["candle_gaps"] = self.candles.gaps
-        if isinstance(p, ReplayProvider):
-            mt = p.market_time
-            d.update({"speed": p.speed, "ticks_per_bar": p.ticks_per_bar, "cursor": p.cursor, "total_minutes": len(p.timeline),
-                      "market_time": mt.isoformat() if mt else None, "ended": p.ended})
-        if isinstance(p, LiveYahooProvider):
-            d.update({"poll_interval_s": p.poll_interval_s, "focus_poll_interval_s": p.focus_interval_s,
-                      "focus_symbols": p.current_focus()})
         d["ltp"] = {s: float(t.price) for s, (t, _) in self.last.items()}
         return d
 
     async def _watch(self) -> None:
         while True:
             try:
+                if isinstance(self.provider, O21MarketProvider):
+                    await self.close_due_candles()
+                    await self.sys.redis.set_json("market:last_packets", self.provider.last_packet, ttl_s=60)
                 st = self.display_status()
                 if st != self._last_status:
                     self._last_status = st
                     await self.sys.bus.publish(Event("market.status", "MarketDataProvider", payload=self.info()))
                 health = HEALTHY if st in (LIVE, REPLAY) else WARNING if st in (DELAYED, STALE) else FAILED
-                lat = self.provider.last_latency_ms if self.provider else None
                 if health == FAILED:
                     self.sys.health.error("market_data", f"{st}: {self.provider.status_detail if self.provider else ''}")
                 else:
-                    self.sys.health.beat("market_data", health, f"{st} - {self.provider.source_name}", lat,
-                                         success=health == HEALTHY)
+                    self.sys.health.beat("market_data", health, f"{st} - {self.provider.source_name}",
+                                         self.provider.last_latency_ms if self.provider else None, success=health == HEALTHY)
             except Exception:
                 log.exception("market watchdog failed")
             await asyncio.sleep(1.0)

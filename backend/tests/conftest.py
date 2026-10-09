@@ -47,9 +47,10 @@ def _truncate():
 
 
 def make_settings(**over) -> Settings:
-    base = dict(database_url=TEST_DB, redis_url=TEST_REDIS, market_data_mode="manual", symbols="RELIANCE,INFY",
+    base = dict(database_url=TEST_DB, redis_url=TEST_REDIS, market_data_mode="manual", broker_mode="paper", symbols="RELIANCE,INFY,TCS",
+                default_strategies="ema_trend,rsi_ema,macd,breakout",
                 jwt_secret="test-secret", broker_base_latency_ms=1, broker_jitter_ms=1, broker_timeout_s=1.0,
-                stale_after_s_replay=3.0, reconcile_interval_s=3600, broker_max_participation=Decimal("1"))
+                stale_after_s_manual=3.0, reconcile_interval_s=3600, enforce_market_hours=True, broker_max_participation=Decimal("1"))
     base.update(over)
     return Settings(**base)
 
@@ -85,7 +86,9 @@ async def wait_for(cond, timeout: float = 5.0, interval: float = 0.05) -> bool:
 @pytest_asyncio.fixture
 async def trading(system):
     """Account configured, prices flowing, trading RUNNING."""
-    await system.setup_account("Test", Decimal(1000000), None, "test", None)
+    # nothing is allocated automatically; the tests allocate like a user would
+    alloc = {sid: Decimal(200000) for sid in ("ema_trend", "rsi_ema", "macd", "breakout")}
+    await system.setup_account("Test", Decimal(1000000), alloc, "test", None)
     feed = system.market.provider
     await feed.push("RELIANCE", "1000.00")
     await feed.push("INFY", "1500.00")
