@@ -174,3 +174,19 @@ async def test_positions_square_off_and_cancel(ex):
     assert ex.deletes == [(1042, {"exchange": "NSE", "token": 2885, "product": "INTRADAY"})]
     acct = await a.get_account()
     assert acct.extra["funds_api"] is False
+
+
+def test_faults_serialize_for_the_fault_lab_api():
+    """/api/faults/scenarios and /api/broker/state report the adapter's armed faults (was an HTTP 500 on 021)."""
+    import json
+    import time as _t
+
+    from app.brokers.o21_adapter import Faults
+    f = Faults(timeout_next_place=1, reject_next=2, extra_latency_ms=900)
+    f.network_down_until = _t.time() + 5
+    d = f.to_dict()
+    assert d["timeout_next_place"] == 1 and d["reject_next"] == 2 and d["extra_latency_ms"] == 900
+    assert 4 <= d["network_down_s"] <= 5
+    json.dumps(d)
+    f.disarm()
+    assert f.to_dict()["network_down_s"] == 0

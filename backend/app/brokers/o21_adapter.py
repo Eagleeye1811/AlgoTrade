@@ -69,6 +69,11 @@ class Faults:
         self.network_down_until = 0.0
         self.timeout_next_place = self.reject_next = self.drop_reports_next = self.extra_latency_ms = 0
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"network_down_s": max(0.0, round(self.network_down_until - time.time(), 1)),
+                "timeout_next_place": self.timeout_next_place, "reject_next": self.reject_next,
+                "drop_reports_next": self.drop_reports_next, "extra_latency_ms": self.extra_latency_ms}
+
 
 class O21Adapter(BrokerAdapter):
     name = "021 Developer Sandbox"

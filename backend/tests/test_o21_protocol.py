@@ -176,3 +176,50 @@ async def test_restart_seeds_filter_from_newest_candle():
     await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=120637, volume=11880895,
                                                 last_trade_time=datetime(2026, 10, 7, 10, 29, 44, tzinfo=timezone.utc)))
     assert ticks == [] and p.rejected["older_than_accepted"] == 1
+
+
+async def test_after_hours_replay_of_the_recorded_021_session():
+    """Outside NSE hours the recorded 021 session is replayed (4 ticks per candle, receive-time stamps) instead of
+    the sandbox stream; inside hours it never runs; an exchange-timed packet ends it."""
+    import time as _t
+    from datetime import date
+    from decimal import Decimal as D
+    from app.brokers.o21_protocol import MarketPacket
+    from app.market.models import Bar
+    from app.market.providers import O21MarketProvider
+    is_open = {"v": False}
+    p = O21MarketProvider(["RELIANCE"], None, None, "wss://unused", sandbox_after_s=20, replay=True,
+                          market_open=lambda: is_open["v"])
+    ticks = []
+
+    async def on_tick(t):
+        ticks.append(t)
+    p.on_tick = on_tick
+    t0 = datetime(2026, 10, 9, 8, 4, tzinfo=timezone.utc)
+    p.set_replay({"RELIANCE": [Bar("RELIANCE", t0, D("1170"), D("1172"), D("1169"), D("1171"), D(400)),
+                               Bar("RELIANCE", t0.replace(minute=5), D("1171"), D("1171.5"), D("1168"), D("1168.5"), D(200))]},
+                 date(2026, 10, 9))
+    p._last_exchange["RELIANCE"] = _t.monotonic() - 21
+    before = datetime.now(timezone.utc)
+    for _ in range(5):
+        await p.replay_step()
+    # up candle: open, low, high, close; then the down candle starts at its open
+    assert [t.price for t in ticks] == [D("1170"), D("1169"), D("1172"), D("1171"), D("1171")]
+    assert all(t.source == "021-replay" and t.ts >= before and t.volume == D(100) for t in ticks[:4])
+    assert p.after_hours["RELIANCE"][0] == "replay"
+    # the sandbox's frozen stream is ignored while replaying
+    old = datetime(2026, 10, 7, 10, 29, 44, tzinfo=timezone.utc)
+    p.seed_newest({"RELIANCE": t0})
+    await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=120637, volume=11880895, last_trade_time=old))
+    assert len(ticks) == 5 and p.sandbox_ticks == 0
+    for _ in range(4):
+        await p.replay_step()
+    assert ticks[-1].price == D("1170")  # looped back to the first candle
+    # during NSE hours there is no replay (the sandbox stream remains the fallback)
+    is_open["v"] = True
+    n = len(ticks)
+    await p.replay_step()
+    assert len(ticks) == n
+    # a real exchange-timed packet ends the after-hours stream
+    await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=117100, volume=5100, last_trade_time=t0.replace(minute=9)))
+    assert ticks[-1].source == "021" and "RELIANCE" not in p.after_hours

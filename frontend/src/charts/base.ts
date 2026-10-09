@@ -43,3 +43,31 @@ export function signalMarkers(list: SignalLike[], minTime: number | null, withSt
     })
     .sort((a, b) => (a.time as number) - (b.time as number))
 }
+
+// short tag per strategy kind, from the subscription id prefix (e.g. "macd-reliance-14" -> "MACD")
+const TAGS: [string, string][] = [['time_entry', 'TIME'], ['open_breakou', 'BRK'], ['ema_trend', 'EMA'], ['macd', 'MACD'],
+  ['rsi_ema', 'RSI'], ['breakout', 'BRK']]
+export const strategyTag = (id?: string) => TAGS.find(([p]) => id?.startsWith(p))?.[1] ?? (id ?? '').split('-')[0].toUpperCase()
+
+/** Compact markers for a chart shared by several strategies: only signals that placed an order, one arrow per side
+ *  per candle, labelled with short strategy tags ("exit" when the order closed a position). */
+export function tradeMarkers(list: SignalLike[], minTime: number | null): SeriesMarker<Time>[] {
+  const groups = new Map<string, { time: number; buy: boolean; tags: string[] }>()
+  for (const s of list) {
+    if ((minTime !== null && s.time < minTime) || !s.action?.startsWith('ORDER')) continue
+    const buy = s.signal === 'BUY'
+    const k = `${s.time}:${buy}`
+    const g = groups.get(k) ?? { time: s.time, buy, tags: [] }
+    const tag = strategyTag(s.strategy_id) + (s.action === 'ORDER_CLOSE' ? ' exit' : '')
+    if (!g.tags.includes(tag)) g.tags.push(tag)
+    groups.set(k, g)
+  }
+  return [...groups.values()].map((g) => ({
+    time: toChartTime(g.time) as Time,
+    position: g.buy ? 'belowBar' : 'aboveBar',
+    color: g.buy ? '#22c55e' : '#ef4444',
+    shape: g.buy ? 'arrowUp' : 'arrowDown',
+    text: g.tags.join(' · '),
+    size: 1,
+  } as SeriesMarker<Time>)).sort((a, b) => (a.time as number) - (b.time as number))
+}

@@ -31,10 +31,11 @@ function AuditList({ onTrace }: { onTrace: (id: string) => void }) {
       </div>
       <Panel>
         {!list.data ? <Loading /> : list.data.length === 0 ? <Empty>No audit events match</Empty> : (
-          <div className="overflow-x-auto"><table className="tbl"><thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Source</th><th>Message</th><th>Actor</th><th>Trace</th></tr></thead>
+          <div className="overflow-x-auto"><table className="tbl"><thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Source</th><th>Strategy</th><th>Message</th><th>Actor</th><th>Trace</th></tr></thead>
             <tbody>{list.data.map((e) => (
               <tr key={e.id}><td className="num text-muted">{fmtTime(e.created_at, true)}</td><td><Badge tone={SEV[e.severity] ?? 'gray'}>{e.severity}</Badge></td>
                 <td className="font-mono text-[11px]">{e.event_type}</td><td className="text-muted">{e.source}</td>
+                <td className="whitespace-nowrap">{e.strategy_id ? <Link className="text-info" to={`/strategies/${e.strategy_id}`}>{e.strategy_id}</Link> : <span className="text-muted">—</span>}</td>
                 <td className="max-w-[560px] whitespace-normal">{e.message}</td><td className="text-muted">{e.actor || ''}</td>
                 <td>{e.correlation_id && <button className="text-info" onClick={() => onTrace(e.correlation_id)}>{shortId(e.correlation_id)}</button>}</td></tr>))}</tbody></table></div>
         )}

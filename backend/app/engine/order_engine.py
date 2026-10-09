@@ -154,7 +154,8 @@ class OrderEngine:
                 return await self._duplicate_key(key, intent)
             oid = str(o.id)
             await self._publish_order(o, "CREATED", "order created")
-            await self.sys.audit.record("ORDER_CREATED", f"order {oid[:8]} created: {intent.side} {intent.quantity} {intent.symbol}",
+            await self.sys.audit.record("ORDER_CREATED", f"order {oid[:8]} created: {intent.side} {intent.quantity} {intent.symbol} for {intent.strategy_id} "
+                                        f"({intent.origin})",
                                         source="OrderEngine", correlation_id=intent.correlation_id,
                                         strategy_id=intent.strategy_id, order_id=oid, symbol=intent.symbol,
                                         payload={"origin": intent.origin, "idempotency_key": key}, broadcast=False)
@@ -351,8 +352,8 @@ class OrderEngine:
                                 strategy_id=o.strategy_id, symbol=o.symbol, payload={
                                     "quantity": pos.quantity, "avg_price": pos.avg_price, "realized_pnl": pos.realized_pnl,
                                     "side": pos.side}))
-        await self.sys.audit.record("FILL_RECEIVED", f"{rep.side} {rep.quantity} {rep.symbol} @ {rep.price} -> position "
-                                    f"{pos.quantity} ({source})", source="Broker", correlation_id=o.correlation_id,
+        await self.sys.audit.record("FILL_RECEIVED", f"{o.strategy_id}: {rep.side} {rep.quantity} {rep.symbol} @ {rep.price} -> strategy "
+                                    f"position {pos.quantity} ({source})", source="Broker", correlation_id=o.correlation_id,
                                     strategy_id=o.strategy_id, order_id=oid, symbol=o.symbol,
                                     payload={"fill_id": rep.fill_id, "latency_ms": rep.latency_ms}, broadcast=False)
         await self.sys.pnl.publish()

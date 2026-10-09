@@ -136,17 +136,34 @@ class O21MarketProvider(MarketDataProvider):
     keeps streaming prices under a frozen, days-old trade time), the rejected packets are used anyway, stamped with
     their receive time and with source "021-sandbox" (counted in `sandbox_ticks`). Exchange-timed packets take over
     again as soon as one passes the filter. The session open/previous close are not taken from those packets.
+
+    After-hours session replay (takes precedence over the sandbox stream): outside the NSE session (Mon-Fri
+    09:15-15:30 IST) and with no exchange-timed packet for `sandbox_after_s`, the last recorded 021 session (the 1m
+    candles built from exchange-timed 021 ticks, set via `set_replay`) is replayed in real time: each candle becomes
+    four ticks (open, low/high, high/low, close; `replay_step_s` apart, so one candle per minute at the default 15 s),
+    stamped with the replay time and with source "021-replay". It loops at the end of the session. Sandbox packets are
+    ignored meanwhile. Exchange-timed packets take over again as soon as one passes the filter.
     The socket is re-opened with a fresh ephemeral key after any drop (021 restarts all sockets at 08:00 IST and
     does not remember subscriptions), with exponential backoff.
     """
     mode = "LIVE"
     source_name = "021 market-data websocket (full packets)"
 
-    def __init__(self, symbols: list[str], client, instruments, ws_url: str, sandbox_after_s: float = 0.0):
+    def __init__(self, symbols: list[str], client, instruments, ws_url: str, sandbox_after_s: float = 0.0,
+                 replay: bool = False, replay_step_s: float = 15.0, market_open: Callable[[], bool] = nse_market_open):
         super().__init__(symbols)
         self.client, self.instruments, self.ws_url = client, instruments, ws_url
         self.sandbox_after_s = sandbox_after_s
         self.sandbox_ticks = 0
+        # symbol -> (kind "replay" | "sandbox", time the current after-hours stream began); empty while exchange-timed
+        # data flows
+        self.after_hours: dict[str, tuple[str, datetime]] = {}
+        self.replay_enabled, self.replay_step_s, self.market_open = replay, replay_step_s, market_open
+        self.replay_bars: dict[str, list[Bar]] = {}
+        self.replay_day = None  # IST date of the replayed session
+        self.replay_ticks = 0
+        self._replay_pos: dict[str, int] = {}
+        self._replay_task: asyncio.Task | None = None
         self._last_exchange: dict[str, float] = {}  # symbol -> monotonic time of the last packet that passed the filter
         self._sandbox_vol: dict[str, int] = {}
         self._connected_mono = time.monotonic()
@@ -212,11 +229,11 @@ class O21MarketProvider(MarketDataProvider):
                                  "exch_time": p.exchange_time.isoformat() if p.exchange_time else None,
                                  "rx": datetime.now(timezone.utc).isoformat(timespec="seconds")})
         if not self._accept(sym, p):
-            if self.sandbox_after_s and p.ltp and (time.monotonic() - self._last_exchange.get(sym, self._connected_mono)
-                                                   >= self.sandbox_after_s):
+            if self._quiet(sym) and p.ltp and not self._replaying(sym):
                 await self._on_sandbox_packet(sym, p)
             return
         self._last_exchange[sym] = time.monotonic()
+        self.after_hours.pop(sym, None)
         d = self.day.setdefault(sym, DayStats())
         rp = lambda v: (Decimal(v) / P100).quantize(Decimal("0.01")) if v else None  # noqa: E731
         if p.open:
@@ -250,6 +267,69 @@ class O21MarketProvider(MarketDataProvider):
             if sym not in self._newest or self._newest[sym][0] < ts:
                 self._newest[sym] = (ts, 0)
 
+    # ------------------------------------------------------------------ after hours
+    def _quiet(self, sym: str) -> bool:
+        """No exchange-timed packet for `sandbox_after_s` (0 disables every after-hours source)."""
+        return bool(self.sandbox_after_s) and (time.monotonic() - self._last_exchange.get(sym, self._connected_mono)
+                                               >= self.sandbox_after_s)
+
+    def _replaying(self, sym: str) -> bool:
+        return self.replay_enabled and bool(self.replay_bars.get(sym)) and not self.market_open() and self._quiet(sym)
+
+    def _mark(self, sym: str, kind: str, now: datetime) -> None:
+        cur = self.after_hours.get(sym)
+        if cur is None or cur[0] != kind:
+            self.after_hours[sym] = (kind, now)
+
+    def set_replay(self, bars: dict[str, list[Bar]], day) -> None:
+        """The recorded 021 session to replay after hours (restarts from its first candle when the day changes)."""
+        if day != self.replay_day:
+            self._replay_pos.clear()
+        self.replay_bars, self.replay_day = bars, day
+
+    def replay_ticks_of(self, b: Bar) -> list[tuple[Decimal, Decimal]]:
+        mid = (b.low, b.high) if b.close >= b.open else (b.high, b.low)
+        vol = Decimal(b.volume) / 4
+        return [(b.open, vol), (mid[0], vol), (mid[1], vol), (b.close, vol)]
+
+    async def replay_step(self) -> None:
+        """Emit the next replayed tick for every symbol that is in replay."""
+        if not self._paused.is_set() or time.time() < self.outage_until:
+            return
+        now = datetime.now(timezone.utc)
+        for sym in self.symbols:
+            if not self._replaying(sym):
+                continue
+            bars = self.replay_bars[sym]
+            i = self._replay_pos.get(sym, 0) % (len(bars) * 4)
+            self._replay_pos[sym] = i + 1
+            price, vol = self.replay_ticks_of(bars[i // 4])[i % 4]
+            self._mark(sym, "replay", now)
+            self._last_price[sym] = price
+            self.replay_ticks += 1
+            if self.on_tick:
+                await self.on_tick(Tick(sym, now, price, vol, "021-replay"))
+
+    async def _replay_loop(self) -> None:
+        while True:
+            # aligned to the wall clock (:00/:15/:30/:45 at 15 s) so each replayed candle opens on its minute
+            await asyncio.sleep(self.replay_step_s - (time.time() % self.replay_step_s) + 0.05)
+            try:
+                await self.replay_step()
+            except Exception:
+                log.exception("session replay step failed")
+
+    async def start(self) -> None:
+        await super().start()
+        if self.replay_enabled and (self._replay_task is None or self._replay_task.done()):
+            self._replay_task = asyncio.create_task(self._replay_loop(), name="market-021-replay")
+
+    async def stop(self) -> None:
+        if self._replay_task:
+            self._replay_task.cancel()
+            self._replay_task = None
+        await super().stop()
+
     async def _on_sandbox_packet(self, sym: str, p) -> None:
         price = (Decimal(p.ltp) / P100).quantize(Decimal("0.01"))
         prev = self._sandbox_vol.get(sym)
@@ -260,8 +340,10 @@ class O21MarketProvider(MarketDataProvider):
             return
         self._last_price[sym] = price
         self.sandbox_ticks += 1
+        now = datetime.now(timezone.utc)
+        self._mark(sym, "sandbox", now)
         if self.on_tick:
-            await self.on_tick(Tick(sym, datetime.now(timezone.utc), price, Decimal(dv), "021-sandbox"))
+            await self.on_tick(Tick(sym, now, price, Decimal(dv), "021-sandbox"))
 
     def _accept(self, sym: str, p) -> bool:
         ltt = p.last_trade_time
@@ -284,8 +366,9 @@ class O21MarketProvider(MarketDataProvider):
         d = super().info()
         d.update({"frames": self.frames, "connected_since": self.connected_at, "rejected_packets": dict(self.rejected),
                   "sandbox_ticks": self.sandbox_ticks, "sandbox_stream_after_s": self.sandbox_after_s,
-                  "sandbox_stream_symbols": sorted(s for s in self.symbols if self.sandbox_after_s and time.monotonic()
-                                                   - self._last_exchange.get(s, self._connected_mono) >= self.sandbox_after_s)})
+                  "replay_enabled": self.replay_enabled, "replay_ticks": self.replay_ticks,
+                  "replay_day": self.replay_day.isoformat() if self.replay_day else None,
+                  "after_hours": {s: k for s, (k, _) in sorted(self.after_hours.items())}})
         return d
 
 

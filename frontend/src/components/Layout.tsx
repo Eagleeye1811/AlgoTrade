@@ -22,6 +22,16 @@ const NAV = [
   { to: '/settings', label: 'Settings / Account', icon: Settings },
 ]
 
+// outside NSE hours the platform replays the recorded 021 session (or uses the sandbox stream): say so
+function afterHoursNote(m: any) {
+  const kinds = Object.values(m?.after_hours ?? {}) as string[]
+  if (!kinds.length) return null
+  const day = m.replay_day ? new Date(`${m.replay_day}T00:00:00+05:30`).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short' }) : ''
+  return kinds.includes('replay')
+    ? <> · <span className="text-amber-300">after hours: replay of the 021 session of {day}</span></>
+    : <> · <span className="text-amber-300">after hours: 021 sandbox stream</span></>
+}
+
 export default function Layout() {
   const { user, logout } = useAuth()
   const { overview } = useSystem()
@@ -107,7 +117,8 @@ function TopBar() {
       </div>
       {(m?.source || (t && Object.keys(t.blocks).length > 0) || err) && (
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-3 py-1 text-[11px]">
-          {m?.source && <span className="text-muted">Data: {m.source}</span>}
+          {m?.source && <span className="text-muted">Data: {m.source}
+            {afterHoursNote(m)}</span>}
           {t && Object.entries(t.blocks).map(([k, v]) => <Badge key={k} tone="amber" className="normal-case">Orders blocked: {v}</Badge>)}
           {err && <span className="text-red-400">{err}</span>}
         </div>

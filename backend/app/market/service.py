@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -21,7 +21,8 @@ from app.core.health import FAILED, HEALTHY, WARNING
 from app.database.models import MarketBar
 from app.market.candle_engine import CandleEngine
 from app.market.models import DELAYED, DISCONNECTED, LIVE, REPLAY, STALE, STOPPED, Bar, Tick
-from app.market.providers import DayStats, ManualProvider, MarketDataProvider, O21MarketProvider, nse_market_open
+from app.market.providers import (IST, DayStats, ManualProvider, MarketDataProvider, O21MarketProvider,
+                                  nse_market_open)
 
 if TYPE_CHECKING:
     from app.engine.system import TradingSystem
@@ -29,7 +30,14 @@ if TYPE_CHECKING:
 log = logging.getLogger("algotrade.market.service")
 TICK_PUSH_GAP_S = 0.25  # max 4 market.tick pushes per second per symbol
 HISTORY_DAYS = 3
-CLOSE_GRACE_S = 3.0  # a candle is closed by the clock this long after its period ends (late ticks still count)
+CLOSE_GRACE_S = 3.0
+SANDBOX_SOURCE = "021-sandbox"  # market_bars.source of candles built from the after-hours sandbox stream
+REPLAY_SOURCE = "021-replay"    # market_bars.source of candles built from the after-hours session replay
+AFTER_HOURS_SOURCES = {"sandbox": SANDBOX_SOURCE, "replay": REPLAY_SOURCE}
+SOURCE_KIND = {v: k for k, v in AFTER_HOURS_SOURCES.items()}
+REPLAY_LOOKBACK_DAYS = 10
+DAY_STATS_KEY = "market:day_stats"  # session open / previous close from 021, kept across restarts
+DAY_STATS_TTL_S = 5 * 86400  # a candle is closed by the clock this long after its period ends (late ticks still count)
 
 
 class MarketDataService:
@@ -44,6 +52,7 @@ class MarketDataService:
         self._tick_trailing: dict[str, asyncio.Task] = {}
         self._last_status: str | None = None
         self._watchdog: asyncio.Task | None = None
+        self._replay_refreshed = 0.0
         self.candles.on_update = self._on_candle_update
         self.candles.on_closed.append(self._persist)
         self.is_market_open: Callable[[], bool] = nse_market_open
@@ -54,7 +63,8 @@ class MarketDataService:
         if self.settings.market_data_mode.lower() == "manual":
             return ManualProvider(syms)
         return O21MarketProvider(syms, self.sys.o21, self.sys.instruments, self.settings.o21_ws_market_url,
-                                 self.settings.o21_sandbox_stream_after_s)
+                                 self.settings.o21_sandbox_stream_after_s, replay=self.settings.after_hours_replay,
+                                 replay_step_s=self.settings.replay_step_s, market_open=lambda: self.is_market_open())
 
     async def start(self) -> None:
         prov = self._make_provider()
@@ -64,11 +74,27 @@ class MarketDataService:
         self.provider = prov
         self.last.clear()
         self.candles.reset()
-        history = await self._history(prov.symbols)
+        history, sources = await self._history(prov.symbols)
         for sym in prov.symbols:
             self.candles.seed(sym, history.get(sym, []))
         if isinstance(prov, O21MarketProvider):
-            prov.seed_newest({sym: bars[-1].ts for sym, bars in history.items() if bars})
+            # the filter starts from the newest candle built from exchange-timed packets; a trailing run of
+            # after-hours candles (replay / sandbox stream) is still marked as such after the restart
+            newest = {}
+            for sym, bars in history.items():
+                srcs = sources[sym]
+                for b, src in zip(reversed(bars), reversed(srcs)):
+                    if src not in SOURCE_KIND:
+                        newest[sym] = b.ts
+                        break
+                if srcs and srcs[-1] in SOURCE_KIND:
+                    i = len(srcs) - 1
+                    while i > 0 and srcs[i - 1] == srcs[-1]:
+                        i -= 1
+                    prov.after_hours[sym] = (SOURCE_KIND[srcs[-1]], bars[i].ts)
+            prov.seed_newest(newest)
+            await self._restore_day_stats(prov)
+            await self.refresh_replay()
         await prov.start()
         if self._watchdog is None or self._watchdog.done():
             self._watchdog = asyncio.create_task(self._watch(), name="market-watchdog")
@@ -90,15 +116,76 @@ class MarketDataService:
         await self.stop()
 
     # ------------------------------------------------------------------ candle persistence (our own history)
-    async def _history(self, symbols: list[str]) -> dict[str, list[Bar]]:
+    async def _history(self, symbols: list[str]) -> tuple[dict[str, list[Bar]], dict[str, list[str]]]:
         since = datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)
         async with self.sys.db.session() as s:
             rows = (await s.execute(select(MarketBar).where(MarketBar.symbol.in_(symbols), MarketBar.interval == "1m",
                                                             MarketBar.ts >= since).order_by(MarketBar.ts))).scalars().all()
         out: dict[str, list[Bar]] = {}
+        sources: dict[str, list[str]] = {}
         for r in rows:
             out.setdefault(r.symbol, []).append(Bar(r.symbol, r.ts, r.open, r.high, r.low, r.close, r.volume))
-        return out
+            sources.setdefault(r.symbol, []).append(r.source)
+        return out, sources
+
+    async def _restore_day_stats(self, prov: O21MarketProvider) -> None:
+        """The exchange sends today's open/previous close only in live packets: after a restart outside market hours
+        (no live packets) the last values received are restored, so the open-breakout rule keeps its reference."""
+        saved = await self.sys.redis.get_json(DAY_STATS_KEY) or {}
+        for sym, v in saved.items():
+            if sym in prov.symbols and sym not in prov.day:
+                prov.day[sym] = DayStats(open=Decimal(v["open"]) if v.get("open") else None,
+                                         prev_close=Decimal(v["prev_close"]) if v.get("prev_close") else None,
+                                         high=Decimal(v["high"]) if v.get("high") else None,
+                                         low=Decimal(v["low"]) if v.get("low") else None,
+                                         trade_day=date.fromisoformat(v["trade_day"]) if v.get("trade_day") else None)
+        self._saved_day_stats = {s: self._day_dict(d) for s, d in prov.day.items()}
+
+    @staticmethod
+    def _day_dict(d: DayStats) -> dict:
+        return {"open": str(d.open) if d.open else None, "prev_close": str(d.prev_close) if d.prev_close else None,
+                "high": str(d.high) if d.high else None, "low": str(d.low) if d.low else None,
+                "trade_day": d.trade_day.isoformat() if d.trade_day else None}
+
+    async def _save_day_stats(self) -> None:
+        p = self.provider
+        cur = {s: self._day_dict(d) for s, d in p.day.items() if d.open}
+        if cur and cur != getattr(self, "_saved_day_stats", None):
+            await self.sys.redis.set_json(DAY_STATS_KEY, cur, ttl_s=DAY_STATS_TTL_S)
+            self._saved_day_stats = cur
+
+    async def refresh_replay(self) -> None:
+        """Load the most recent recorded 021 session (candles from exchange-timed ticks) for the after-hours replay."""
+        p = self.provider
+        if not isinstance(p, O21MarketProvider) or not p.replay_enabled:
+            return
+        since = datetime.now(timezone.utc) - timedelta(days=REPLAY_LOOKBACK_DAYS)
+        async with self.sys.db.session() as s:
+            rows = (await s.execute(select(MarketBar).where(MarketBar.symbol.in_(p.symbols), MarketBar.interval == "1m",
+                                                            MarketBar.source == "ticks", MarketBar.ts >= since)
+                                    .order_by(MarketBar.ts))).scalars().all()
+        if not rows:
+            return
+        day = max(r.ts.astimezone(IST).date() for r in rows)
+        bars: dict[str, list[Bar]] = {}
+        for r in rows:
+            if r.ts.astimezone(IST).date() == day:
+                bars.setdefault(r.symbol, []).append(Bar(r.symbol, r.ts, r.open, r.high, r.low, r.close, r.volume))
+        p.set_replay(bars, day)
+
+    def after_hours(self, symbol: str) -> tuple[str, datetime] | None:
+        """(kind "replay" | "sandbox", start) of the current after-hours stream for `symbol`; None while exchange-timed
+        021 data flows."""
+        p = self.provider
+        return p.after_hours.get(symbol) if isinstance(p, O21MarketProvider) else None
+
+    def after_hours_info(self, symbol: str) -> dict | None:
+        ah = self.after_hours(symbol)
+        if ah is None:
+            return None
+        p = self.provider
+        return {"kind": ah[0], "since": ah[1].isoformat(),
+                "replay_day": p.replay_day.isoformat() if ah[0] == "replay" and p.replay_day else None}
 
     async def _persist(self, symbol: str, tf: str, bar: Bar) -> None:
         if tf != "1m" or isinstance(self.provider, ManualProvider):
@@ -107,9 +194,14 @@ class MarketDataService:
             async with self.sys.db.transaction() as s:
                 await s.execute(pg_insert(MarketBar).values(symbol=symbol, interval="1m", ts=bar.ts, open=bar.open,
                                                             high=bar.high, low=bar.low, close=bar.close,
-                                                            volume=bar.volume, source="ticks").on_conflict_do_nothing())
+                                                            volume=bar.volume, source=self._bar_source(symbol, bar))
+                                .on_conflict_do_nothing())
         except Exception as e:  # never let persistence break the data path
             log.warning("could not persist candle %s %s: %s", symbol, bar.ts, e)
+
+    def _bar_source(self, symbol: str, bar: Bar) -> str:
+        ah = self.after_hours(symbol)
+        return AFTER_HOURS_SOURCES[ah[0]] if ah is not None and bar.ts + timedelta(minutes=1) > ah[1] else "ticks"
 
     # ------------------------------------------------------------------ data path
     async def _on_tick(self, tick: Tick) -> None:
@@ -159,7 +251,8 @@ class MarketDataService:
 
     async def _on_candle_update(self, symbol: str, tf: str, bar: Bar) -> None:
         await self.sys.bus.publish(Event("candle.update", "CandleEngine", symbol=symbol,
-                                         payload={"timeframe": tf, "candle": bar.to_dict()}))
+                                         payload={"timeframe": tf, "candle": bar.to_dict(),
+                                                  "after_hours": self.after_hours_info(symbol)}))
 
     async def _on_status(self, status: str, detail: str) -> None:
         sev = "ERROR" if status == DISCONNECTED else "INFO"
@@ -234,7 +327,11 @@ class MarketDataService:
             try:
                 if isinstance(self.provider, O21MarketProvider):
                     await self.close_due_candles()
+                    if not self.is_market_open() and time.monotonic() - self._replay_refreshed > 60:
+                        self._replay_refreshed = time.monotonic()  # pick up the session that just ended
+                        await self.refresh_replay()
                     await self.sys.redis.set_json("market:last_packets", self.provider.last_packet, ttl_s=60)
+                    await self._save_day_stats()
                 st = self.display_status()
                 if st != self._last_status:
                     self._last_status = st
