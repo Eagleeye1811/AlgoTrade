@@ -1,6 +1,6 @@
 # AlgoTrade: Algorithmic Trading Platform on the 021 Developer APIs
 
-**Hackathon problem statement 021-03: Algo trading platform** · Team ERROR404
+**Hackathon problem statement 021 - 06: Algo trading platform** · Team ERROR404
 
 > *Strategies may fail, but risk controls must remain active.*
 
