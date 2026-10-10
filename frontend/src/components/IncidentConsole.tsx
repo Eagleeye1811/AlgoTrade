@@ -30,7 +30,7 @@ const fmtDur = (v: number | null) => (v == null ? '—' : v < 1000 ? `${Math.max
 
 export interface Run { run_id: string; scenario: string; steps: any[]; status: string; outcome?: string }
 
-export default function IncidentConsole({ run, title }: { run: Run; title: string }) {
+export default function IncidentConsole({ run }: { run: Run; title?: string }) {
   const running = run.status === 'RUNNING'
   const steps = run.steps
   const t0 = steps[0]?.at
@@ -146,7 +146,6 @@ export default function IncidentConsole({ run, title }: { run: Run; title: strin
           <Score label="Autopilot" value={pilot ? pilot.title.replace(/^Autopilot /, '') : 'off'} tone={pilot ? (pilot.status === 'ok' ? 'green' : 'amber') : undefined} small />
         </div>
       )}
-      <div className="sr-only">{title}</div>
     </div>
   )
 }

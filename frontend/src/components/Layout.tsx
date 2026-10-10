@@ -38,7 +38,7 @@ export default function Layout() {
   useEffect(() => { wsClient.connect() }, [])
   useEffect(() => { if (overview && !overview.account_configured) nav('/setup') }, [overview, nav])
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-screen flex-col overflow-hidden">
       <TopBar />
       <SafeModeBanner />
       <div className="flex min-h-0 flex-1">
@@ -58,7 +58,7 @@ export default function Layout() {
               <button className="btn" onClick={async () => { await logout(); nav('/login') }}><LogOut size={12} />Logout</button></div>
           </div>
         </aside>
-        <main className="min-w-0 flex-1 overflow-auto">
+        <main className="relative min-w-0 flex-1 overflow-auto">
           <MobileNav />
           <div className="p-3 md:p-4"><Outlet /></div>
         </main>
