@@ -1,15 +1,15 @@
-import { Fragment, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useApi, useEvents } from '../hooks/useEvents'
 import { api } from '../services/api'
 import { fmtTime } from '../services/format'
-import FaultTimeline from '../components/FaultTimeline'
 import IncidentConsole from '../components/IncidentConsole'
 import { Bot } from 'lucide-react'
 import { Badge, Empty, ErrorText, Loading, Panel, StatusBadge } from '../components/ui'
 
-interface LiveRun { run_id: string; scenario: string; steps: any[]; status: string; outcome?: string }
+interface LiveRun { run_id: string; scenario: string; steps: any[]; status: string; outcome?: string; corr?: string | null }
 
 export default function Faults() {
   const { user } = useAuth()
@@ -24,21 +24,20 @@ export default function Faults() {
   const firstRunning = strategies.data?.find((x: any) => x.status === 'RUNNING')?.id || strategies.data?.[0]?.id || ''
   const targetFor = (key: string) => targets[key] || firstRunning
   const [err, setErr] = useState<string | null>(null)
-  const [openRun, setOpenRun] = useState<string | null>(null)
   useEvents(['fault.step'], (e) => setLive((r) => {
     const p = e.payload
-    if (!r || (r.run_id && r.run_id !== p.run_id)) return { run_id: p.run_id, scenario: p.scenario, steps: [p.step], status: 'RUNNING' }
-    if (!r.run_id) return { ...r, run_id: p.run_id, steps: [...r.steps, p.step] }
+    if (!r || (r.run_id && r.run_id !== p.run_id)) return { run_id: p.run_id, scenario: p.scenario, steps: [p.step], status: 'RUNNING', corr: e.correlation_id }
+    if (!r.run_id) return { ...r, run_id: p.run_id, steps: [...r.steps, p.step], corr: e.correlation_id }
     return { ...r, steps: [...r.steps, p.step] }
   }))
   useEvents(['fault.completed'], (e) => setLive((r) => (r && r.run_id === e.payload.run_id ? { ...r, status: e.payload.status, outcome: e.payload.outcome, steps: e.payload.steps } : r)))
   useEvents(['chaos.started', 'chaos.progress', 'chaos.completed'], (e) => setChaos({ ...e.payload, phase: e.event_type }))
-  useEffect(() => { if (!live && runs.data?.length) { const r = runs.data[0]; setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome }) } }, [runs.data, live])
+  useEffect(() => { if (!live && runs.data?.length) { const r = runs.data[0]; setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome, corr: r.correlation_id }) } }, [runs.data, live])
   // latest run per scenario, for the result shown on each card
   const lastRun: Record<string, any> = {}
   for (const r of runs.data || []) if (!lastRun[r.scenario]) lastRun[r.scenario] = r
   const show = (r: any) => {
-    setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome })
+    setLive({ run_id: r.id, scenario: r.scenario, steps: r.steps, status: r.status, outcome: r.outcome, corr: r.correlation_id })
     document.getElementById('fault-timeline')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   const inject = async (key: string) => {
@@ -115,6 +114,7 @@ export default function Faults() {
         <Panel title={live ? `Timeline · ${titles[live.scenario] || live.scenario}` : 'Timeline'} right={live && <StatusBadge status={live.status} />} bodyClass="p-3 space-y-3">
           {!live ? <Empty>Inject a fault to see FAULT INJECTED → SYSTEM RESPONSE → RECOVERY ACTION → FINAL STATE</Empty> : <>
             <IncidentConsole run={live} title={titles[live.scenario] || live.scenario} />
+            {live.corr && <div className="flex justify-end"><Link className="btn" to={`/audit?trace=${live.corr}`}>View this run in the Audit Trail →</Link></div>}
             {live.outcome && (
               <div className={`rounded border p-2.5 text-xs ${live.status === 'COMPLETED' ? 'border-green-500/40 bg-green-500/5' : 'border-amber-500/40 bg-amber-500/5'}`}>
                 <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Outcome</div>
@@ -125,19 +125,6 @@ export default function Faults() {
         </Panel>
       </div>
 
-      <Panel title="Run history">
-        {!runs.data ? <Loading /> : runs.data.length === 0 ? <Empty>No fault runs yet</Empty> : (
-          <div className="overflow-x-auto"><table className="tbl"><thead><tr><th>Started</th><th>Scenario</th><th>Status</th><th>By</th><th>Group</th><th>Outcome</th></tr></thead>
-            <tbody>{runs.data.map((r) => (
-              <Fragment key={r.id}>
-                <tr className="clickable" onClick={() => setOpenRun(openRun === r.id ? null : r.id)}>
-                  <td className="num text-muted">{fmtTime(r.started_at, true)}</td><td>{titles[r.scenario] || r.scenario}</td><td><StatusBadge status={r.status} /></td>
-                  <td className="text-muted">{r.triggered_by}</td><td className="num text-muted">{r.run_group ? r.run_group.slice(0, 6) : '—'}</td><td className="max-w-[420px] truncate">{r.outcome}</td>
-                </tr>
-                {openRun === r.id && <tr><td colSpan={6} className="bg-bg p-3 whitespace-normal"><FaultTimeline steps={r.steps} /></td></tr>}
-              </Fragment>))}</tbody></table></div>
-        )}
-      </Panel>
 
     </div>
   )

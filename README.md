@@ -29,7 +29,6 @@ strategy. A kill switch flattens everything within 10 seconds.
 12. [Configuration](#configuration)
 13. [Tests](#tests)
 14. [Project structure](#project-structure)
-15. [Known limitations](#known-limitations)
 
 ---
 
@@ -38,8 +37,8 @@ strategy. A kill switch flattens everything within 10 seconds.
 - **Real 021 integration:** REST (login, instruments, orders, trades, positions), the binary market-data websocket
   (byte-exact parser) and the binary orders websocket.
 - **Candles from raw ticks:** live 1m/5m candles drawn TradingView-style, with a countdown to the next candle.
-- **Three required strategies plus extras:** company Strategy 1 and Strategy 2, our EMA trend strategy, and MACD,
-  RSI + EMA and Breakout.
+- **Three required strategies plus extras:** company Strategy 1 and Strategy 2, our Strategy 3 (MACD crossover), and
+  EMA crossover + 5m trend, RSI + EMA and Breakout.
 - **Multi-user subscriptions:** each user subscribes to strategies with their own allocation and risk limits. Several
   strategies share one account, each with its own position and P&L, including long and short on the same stock.
 - **Risk Firewall** on every order, a **circuit breaker** (halt and flatten), and a **kill switch** with a 10 s deadline.
@@ -53,7 +52,7 @@ strategy. A kill switch flattens everything within 10 seconds.
 
 | Level | Requirement | What the platform does | Where |
 |---|---|---|---|
-| **L1** | User accounts, strategy subscription, candles from ticks | Registration and login (ADMIN/TRADER). Users **subscribe** to a strategy on an NSE stock with a quantity, allocation and limits. **1m and 5m candles are built from 021 ticks**; the EMA strategy uses both in its entry rule. | `api/auth.py`, `api/strategies.py`, `market/candle_engine.py`, `market/providers.py` |
+| **L1** | User accounts, strategy subscription, candles from ticks | Registration and login (ADMIN/TRADER). Users **subscribe** to a strategy on an NSE stock with a quantity, allocation and limits. **1m and 5m candles are built from 021 ticks**; Strategy 3 (MACD) enters on the 1m candles, and the EMA trend strategy uses both 1m and 5m in its entry rule. | `api/auth.py`, `api/strategies.py`, `market/candle_engine.py`, `market/providers.py` |
 | **L2** | Live orders, fills, partial fills, rejections, aligned positions, exact trades with net P&L | Orders via `POST /orders`; fills read from REST, triggered by the orders websocket plus a 2 s poll; partial fills and rejections handled; reconciliation against `GET /orders`, `/orders/{id}/trades` and `/portfolio/positions`. **Exact trade list with net P&L after charges** on the *Orders, Trades & P&L* page (per-strategy totals, plus the *Trades* tab with every fill, its charges and net), `GET /api/trades` and CSV. | `brokers/o21_adapter.py`, `engine/order_engine.py`, `resilience/reconciliation.py`, `api/trades.py` |
 | **L3** | Per-strategy max daily loss, max position and max orders/minute; kill switch within 10 s | All three limits enforced by the Risk Firewall for every strategy. **Kill switch**: SAFE MODE, cancel all, close all, 10-second deadline, elapsed time recorded. | `engine/risk_firewall.py`, `engine/risk_limits.py`, `resilience/kill_switch.py` |
 | **L4** | ≥ 3 strategies on one account with their own P&L and position, long and short on the same stock | Any number of subscriptions on one 021 account; per-strategy position and P&L books; for example a long and a short time-entry strategy on RELIANCE at the same time. | `engine/position_manager.py`, `engine/pnl_engine.py` |
@@ -121,25 +120,28 @@ Shared platform rules, enforced outside strategy code (`engine/strategy_engine.p
 4. **One filled entry per day.** An entry limit that does not fill is cancelled after 60 s (`limit_order_ttl_s`) and
    does not use up the day's entry. Any position still open is squared off at 15:15.
 
-### Strategy 3: our own, EMA crossover + 5m trend (`EMA_TREND`, `strategies/ema_trend.py`)
-* **Data:** closed 1m and 5m candles built by the platform from 021 ticks; the rules are evaluated at each 1m
-  candle close.
-* **Indicators:** `fast` = EMA(9) and `slow` = EMA(21) of 1m closes (each EMA seeded with the SMA of its first
-  `period` closes); `trend` = EMA(20) of 5m closes; `close5` = close of the last closed 5m candle. All periods can be
-  changed per subscription.
-* **Long entry:** `fast` crosses above `slow` (previously `fast ≤ slow`, now `fast > slow`) and `close5 > trend`,
-  while flat.
-* **Short entry:** `fast` crosses below `slow` and `close5 < trend`, while flat.
-* **Exit:** the opposite crossover (always closes, whatever the 5m trend); stop-loss 1% and take-profit 2% from the
-  average entry price, checked on every tick (market orders); square-off at 15:15.
-* **No entry** from a candle that closes at or after 15:10 IST, or before enough closed 5m candles exist for the trend
-  EMA. A crossover then only closes a position.
-* **Size:** the subscription's fixed quantity (default 10) per entry; never added to.
+### Strategy 3: our own, MACD crossover (`MACD`, `strategies/macd.py`)
+* **Data:** closed 1m candles built by the platform from 021 ticks; the rules are evaluated at each 1m candle close.
+* **Indicators** on 1m closes: `macd` = EMA(fast) − EMA(slow); `signal` = EMA(signal) of `macd`; `histogram` =
+  `macd` − `signal` (each EMA seeded with the SMA of its first `period` values). Defaults fast 12, slow 26, signal 9;
+  all can be changed per subscription (fast must be smaller than slow).
+* **Warm-up:** no signal until `slow + signal + 1` closed candles exist.
+* **Long entry:** `macd` crosses above `signal` (previously `macd ≤ signal`, now `macd > signal`), while flat → **buy**.
+* **Short entry:** `macd` crosses below `signal`, while flat → **sell** (`qty` negative).
+* **Exit:** the opposite crossover closes the whole position; stop-loss 1% and take-profit 2% from the average entry
+  price, checked on every tick (market orders); square-off at 15:15.
+* **No entry** from a candle that closes at or after 15:10 IST.
+* **Size:** the subscription's fixed quantity per entry; never added to.
 
-**Also available:** MACD crossover, RSI + EMA and Breakout (`backend/app/strategies/`), with the same platform exits.
+### Also available
+* **EMA crossover + 5m trend** (`EMA_TREND`, `strategies/ema_trend.py`): on each 1m candle close, `fast` = EMA(9)
+  and `slow` = EMA(21) of 1m closes, `trend` = EMA(20) of 5m closes, `close5` = last closed 5m close. Long entry
+  when `fast` crosses above `slow` and `close5 > trend`; short entry when `fast` crosses below `slow` and
+  `close5 < trend`; while flat. The opposite crossover always closes. Stop-loss 1%, take-profit 2%, square-off 15:15.
+* **RSI + EMA** and **Breakout** (`backend/app/strategies/`), with the same platform exits.
 
 **Capital is never allocated automatically.** The first ADMIN gets three subscriptions at startup (`time_entry`,
-`open_breakout`, `ema_trend`; see `ALGOTRADE_DEFAULT_STRATEGIES`) with ₹0 allocated. A strategy cannot open positions
+`open_breakout`, `macd`; see `ALGOTRADE_DEFAULT_STRATEGIES`) with ₹0 allocated. A strategy cannot open positions
 until its user gives it an allocation (when subscribing, or Strategies → Configure). Allocations never exceed the
 account capital in total.
 
@@ -203,7 +205,9 @@ account capital in total.
 | Market | Stale market data |
 | Orders and state | Duplicate order attempt, internal state corruption, server restart, risk rejection |
 
-*Partial fill* needs the local simulator and is disabled on 021. On 021, scenarios place real sandbox orders, with
+On 021, *Partial fill* is simulated at the adapter boundary: 021 fills the order normally, but the adapter reports only
+40% of its fills for 4 s (splitting a trade if needed), then the rest; reconciliation waits meanwhile. Scenarios place
+real sandbox orders, with
 test quantities capped at the strategy's max position. Each scenario has its own target-strategy picker and Inject
 button. Chaos mode runs several scenarios back to back.
 
@@ -317,7 +321,7 @@ All settings are environment variables prefixed `ALGOTRADE_` (see `backend/app/c
 | `ALGOTRADE_DATABASE_URL` | `postgresql+asyncpg://localhost:5432/algotrade` | PostgreSQL |
 | `ALGOTRADE_REDIS_URL` / `_REDIS_NAMESPACE` | `redis://localhost:6379/0` / `algotrade` | Redis and its key/channel prefix |
 | `ALGOTRADE_SYMBOLS` | 15 NSE large caps | Tradable stocks |
-| `ALGOTRADE_DEFAULT_STRATEGIES` | `time_entry,open_breakout,ema_trend` | Subscriptions created for the first ADMIN (₹0 allocated) |
+| `ALGOTRADE_DEFAULT_STRATEGIES` | `time_entry,open_breakout,macd` | Subscriptions created for the first ADMIN (₹0 allocated) |
 | `ALGOTRADE_ENFORCE_MARKET_HOURS` | `false` | Apply the NSE session rules |
 | `ALGOTRADE_AFTER_HOURS_REPLAY` / `_REPLAY_STEP_S` | `true` / `15` | Replay the recorded 021 session after hours |
 | `ALGOTRADE_O21_SANDBOX_STREAM_AFTER_S` | `20` | Fall back to the sandbox stream when nothing else flows (0 = off) |
@@ -368,7 +372,7 @@ backend/
     market/         market-data providers, candle engine, market-data service
     notifications/  Telegram copilot
     resilience/     kill switch, reconciliation, fault simulator + autopilot, demo mode
-    strategies/     Strategy 1, Strategy 2, EMA trend, MACD, RSI + EMA, Breakout, indicators
+    strategies/     Strategy 1, Strategy 2, Strategy 3 (MACD), EMA trend, RSI + EMA, Breakout, indicators
   alembic/          database migrations
   data/             charges table, instrument cache
   tests/
@@ -376,14 +380,3 @@ frontend/src/
   pages/            Dashboard, Strategies, Orders, Positions, Risk, Health, Faults, Audit, Settings, ...
   components/       charts, incident console, Telegram panel, risk advisor, trades summary, ...
 ```
-
-## Known limitations
-
-- **One 021 account (UCC) is shared by all users.** Users are separated inside the platform (their own
-  subscriptions, positions, P&L and limits). On 021 their positions net into one position per stock.
-- **Charges are a placeholder** until the official table is published.
-- **No funds endpoint at 021**, so cash is not reconciled; margin is the platform's virtual margin.
-- **After hours the market data is a replay** of the recorded session. Orders still go to the 021 sandbox and fill at
-  its own prices, so fills can differ from the replayed price.
-- **021 does not replay order events**, so open orders are also polled; and a second login anywhere revokes the
-  platform's token (see *One session per 021 account* above).

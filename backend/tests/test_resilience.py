@@ -375,3 +375,14 @@ async def test_orders_rejected_by_the_broker_before_numbering_do_not_block(tradi
     rec = await sys_.reconciler.run("TEST")
     assert rec["status"] == "MATCHED" and rec["details"]["unnumbered_rejected_at_broker"] == 1
     assert "reconciliation" not in sys_.controller.blocks
+
+
+async def test_every_fault_step_is_in_the_audit_trail(trading):
+    sys_ = trading
+    from app.database.models import SystemEvent
+    res = await sys_.faults.run("state_corruption", "test", {"strategy_id": "macd"})
+    async with sys_.db.session() as s:
+        rows = (await s.execute(select(SystemEvent).where(SystemEvent.correlation_id == res["correlation_id"],
+                                                          SystemEvent.event_type == "FAULT_STEP"))).scalars().all()
+    assert len(rows) == len(res["steps"]) and all(r.strategy_id == "macd" for r in rows)
+    assert any(r.message.startswith("[Internal state corruption] Fault injected:") for r in rows)

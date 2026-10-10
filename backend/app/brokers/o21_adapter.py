@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable
@@ -63,16 +63,21 @@ class Faults:
     reject_next: int = 0
     reject_reason: str = "simulated RMS rejection (fault injection)"
     drop_reports_next: int = 0      # lose the next execution report (reconciliation must recover it)
+    partial_next: int = 0           # next order: report only partial_ratio of its fills until partial_hold_s passed
+    partial_ratio: Decimal = Decimal("0.4")
+    partial_hold_s: float = 4.0
     extra_latency_ms: int = 0
 
     def disarm(self) -> None:
         self.network_down_until = 0.0
         self.timeout_next_place = self.reject_next = self.drop_reports_next = self.extra_latency_ms = 0
+        self.partial_next = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {"network_down_s": max(0.0, round(self.network_down_until - time.time(), 1)),
                 "timeout_next_place": self.timeout_next_place, "reject_next": self.reject_next,
-                "drop_reports_next": self.drop_reports_next, "extra_latency_ms": self.extra_latency_ms}
+                "drop_reports_next": self.drop_reports_next, "extra_latency_ms": self.extra_latency_ms,
+                "partial_next": self.partial_next}
 
 
 def trade_time(v: Any, now: float | None = None) -> datetime:
@@ -104,6 +109,8 @@ class O21Adapter(BrokerAdapter):
         self.by_order: dict[str, str] = {}           # 021 order id -> client order id
         self.open_ids: set[str] = set()
         self.seen_trades: set[str] = set()
+        self.partial_holds: dict[str, dict] = {}       # broker order id -> partial-fill simulation state
+        self._split_done: dict[str, Decimal] = {}      # 021 trade id -> quantity already reported
         self.last_status: dict[str, str] = {}
         self.square_off: dict[str, int] = {}         # symbol -> squareOffQuantity (latest positions read)
         self._tasks: list[asyncio.Task] = []
@@ -175,6 +182,11 @@ class O21Adapter(BrokerAdapter):
         if not oid:
             raise BrokerRejected(f"021 returned no order id: {res}")
         self._claim(j, oid)
+        if self.faults.partial_next > 0:  # liquidity-shortage simulation: hold back part of this order's fills
+            self.faults.partial_next -= 1
+            total = Decimal(abs(qty))
+            self.partial_holds[oid] = {"allowed": (total * self.faults.partial_ratio).to_integral_value(rounding="ROUND_DOWN") or 1,
+                                       "release_at": time.time() + self.faults.partial_hold_s, "emitted": Decimal(0)}
         if self.faults.timeout_next_place > 0:  # the order exists at 021, but we "lose" the response
             self.faults.timeout_next_place -= 1
             raise BrokerTimeout("021 POST /orders: response lost (injected timeout) - outcome unknown")
@@ -326,8 +338,15 @@ class O21Adapter(BrokerAdapter):
                 cid = await self._client_id(oid)
                 if not cid:
                     return  # not placed by this platform (e.g. manual order in the web app): reconciliation reports it
+                hold = self.partial_holds.get(oid)
+                if hold is not None and time.time() >= hold["release_at"]:
+                    hold["allowed"] = None  # liquidity returned: release everything
                 if abs(int(row.get("qtyTraded") or 0)) > 0:
                     for rep in await self._order_fills(oid):
+                        if hold is not None:
+                            rep = self._held(hold, rep)
+                            if rep is None:
+                                continue
                         if rep.fill_id in self.seen_trades:
                             continue
                         self.seen_trades.add(rep.fill_id)
@@ -338,7 +357,10 @@ class O21Adapter(BrokerAdapter):
                         if self.on_execution:
                             await self.on_execution(rep)
                 status = row.get("status", "")
-                if status in TERMINAL:
+                if hold is not None and hold["allowed"] is None and hold["emitted"] >= abs(int(row.get("qtyTraded") or 0)):
+                    self.partial_holds.pop(oid, None)
+                    hold = None
+                if status in TERMINAL and hold is None:
                     self.open_ids.discard(oid)
                 if status != self.last_status.get(oid):
                     self.last_status[oid] = status
@@ -348,6 +370,26 @@ class O21Adapter(BrokerAdapter):
                     self.open_ids.add(oid)
             except (BrokerUnavailable, BrokerTimeout, BrokerRejected) as e:
                 log.warning("021 refresh of order %s failed: %s", oid, e)
+
+    def _held(self, hold: dict, rep: ExecutionReport) -> ExecutionReport | None:
+        """Partial-fill simulation: pass fills through up to the allowed quantity, splitting a trade if needed (the
+        first part keeps 021's trade id, the remainder is reported later as '<id>/2')."""
+        done = self._split_done.get(rep.fill_id, Decimal(0))  # quantity of this trade already reported
+        left = rep.quantity - done
+        if left <= 0:
+            return None
+        room = left if hold["allowed"] is None else min(left, hold["allowed"] - hold["emitted"])
+        if room <= 0:
+            return None
+        fid = rep.fill_id if done == 0 else f"{rep.fill_id}/2"
+        self._split_done[rep.fill_id] = done + room
+        hold["emitted"] += room
+        return replace(rep, fill_id=fid, quantity=room, cumulative_filled=hold["emitted"])
+
+    @property
+    def holding_fills(self) -> bool:
+        """A partial-fill injection is holding back reported fills (internal and 021 positions differ meanwhile)."""
+        return bool(self.partial_holds)
 
     async def _poll_loop(self) -> None:
         while True:

@@ -60,7 +60,7 @@ export default function Health() {
             <div key={i} className="flex gap-2"><StatusBadge status={s.status} /><div><div className="font-medium">{s.title}</div><div className="text-muted">{s.detail}</div></div></div>
           ))}
         </Panel>
-        <Panel title="Internal books vs broker (021 order book & positions)" right={<button className="btn" onClick={broker.reload}>Refresh</button>} bodyClass="p-3 text-xs space-y-2">
+        <Panel title="Platform vs 021 positions" right={<button className="btn" onClick={broker.reload}>Refresh</button>} bodyClass="p-3 text-xs space-y-2">
           {broker.error ? <ErrorText error={broker.error} /> : !broker.data ? <Loading /> : <BrokerCompare b={broker.data} />}
         </Panel>
       </div>
@@ -107,14 +107,18 @@ function BrokerCompare({ b }: { b: any }) {
   const active = Object.entries(b.faults).filter(([, v]) => v && v !== 0)
   return (
     <>
-      <table className="tbl"><thead><tr><th>Symbol</th><th className="text-right">Internal net (sum of strategies)</th><th className="text-right">Broker position</th><th className="text-right">Broker avg</th><th></th></tr></thead>
+      <div className="overflow-x-auto"><table className="tbl w-full">
+        <thead><tr><th>Stock</th><th className="text-right" title="sum of all strategies' positions">Platform</th><th className="text-right">021</th>
+          <th className="text-right">021 avg price</th><th className="text-right">Status</th></tr></thead>
         <tbody>{syms.length === 0 ? <tr><td colSpan={5} className="text-muted">No positions on either side</td></tr> : syms.map((s) => {
           const i = Number(b.internal_net[s] ?? 0), br = Number(bmap[s]?.quantity ?? 0)
-          return <tr key={s}><td>{s}</td><td className="num text-right"><Side side={i > 0 ? 'LONG' : i < 0 ? 'SHORT' : 'FLAT'} /> {fmtQty(i)}</td><td className="num text-right">{fmtQty(br)}</td><td className="num text-right">{bmap[s] ? fmtNum(bmap[s].avg_price) : '—'}</td>
-            <td>{i === br ? <Badge tone="green">match</Badge> : <Badge tone="red">MISMATCH</Badge>}</td></tr>
-        })}</tbody></table>
-      <div className="num">Broker account {b.account.account_id}{b.account.extra?.funds_api === false
-        ? <span className="text-muted"> · funds not exposed by the 021 API{b.account.extra?.token_expires_at ? ` · token valid until ${b.account.extra.token_expires_at}` : ''}</span>
+          return <tr key={s}><td className="font-medium">{s}</td>
+            <td className="num text-right whitespace-nowrap"><Side side={i > 0 ? 'LONG' : i < 0 ? 'SHORT' : 'FLAT'} /> {fmtQty(i)}</td>
+            <td className="num text-right">{fmtQty(br)}</td><td className="num text-right">{bmap[s] ? fmtNum(bmap[s].avg_price) : '—'}</td>
+            <td className="text-right">{i === br ? <Badge tone="green">match</Badge> : <Badge tone="red">mismatch</Badge>}</td></tr>
+        })}</tbody></table></div>
+      <div className="text-muted">021 account <span className="font-medium text-text">{b.account.account_id}</span>{b.account.extra?.funds_api === false
+        ? <> · funds not exposed by the 021 API{b.account.extra?.token_expires_at ? <> · session valid until <span className="num text-text">{new Date(b.account.extra.token_expires_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span></> : null}</>
         : <>: cash {fmtINR(b.account.cash, 2)} · margin used {fmtINR(b.account.margin_used)} · starting {fmtINR(b.account.starting_cash)}</>}</div>
       <div className="flex flex-wrap items-center gap-2"><span className="text-muted">Injected broker faults:</span>
         {active.length === 0 ? <Badge tone="green">none</Badge> : active.map(([k, v]) => <Badge key={k} tone="amber">{k}: {String(v)}</Badge>)}</div>

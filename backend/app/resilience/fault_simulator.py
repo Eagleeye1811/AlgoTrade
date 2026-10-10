@@ -38,6 +38,8 @@ log = logging.getLogger("algotrade.faults")
 
 INJECT, RESPONSE, RECOVERY, FINAL = "FAULT_INJECTED", "SYSTEM_RESPONSE", "RECOVERY_ACTION", "FINAL_STATE"
 AUTOPILOT = "AUTOPILOT"
+PHASE_LABEL = {INJECT: "Fault injected", RESPONSE: "System response", RECOVERY: "Recovery", FINAL: "Final state",
+               AUTOPILOT: "Autopilot"}
 AUTOPILOT_KEY = "fault_autopilot"
 AUTOPILOT_COUNTDOWN_S = 5
 
@@ -50,6 +52,7 @@ class Timeline:
     def __init__(self, sim: "FaultSimulator", run_id: uuid.UUID, scenario: str, corr: str):
         self.sim, self.run_id, self.scenario, self.corr = sim, run_id, scenario, corr
         self.steps: list[dict[str, Any]] = []
+        self.strategy_id: str | None = None  # target strategy, when the scenario has one
 
     async def step(self, phase: str, title: str, detail: str = "", status: str = "info", data: dict | None = None) -> None:
         st = {"phase": phase, "title": title, "detail": detail, "status": status, "at": utcnow().isoformat(),
@@ -60,6 +63,12 @@ class Timeline:
             await s.execute(update(FaultSimulation).where(FaultSimulation.id == self.run_id).values(steps=self.steps))
         await sys.bus.publish(Event("fault.step", "FaultSimulator", correlation_id=self.corr,
                                     payload={"run_id": str(self.run_id), "scenario": self.scenario, "step": st}))
+        # every step is also an audit event, linked to the run (and its test orders/fills) by the correlation id
+        label = self.sim.SCENARIOS.get(self.scenario, (self.scenario,))[0]
+        await sys.audit.record("FAULT_STEP", f"[{label}] {PHASE_LABEL.get(phase, phase)}: {title}" + (f" - {detail}" if detail else ""),
+                               source="FaultSimulator", correlation_id=self.corr, strategy_id=self.strategy_id,
+                               severity={"error": "ERROR", "warn": "WARN"}.get(status, "INFO"),
+                               payload={"run_id": str(self.run_id), "scenario": self.scenario, "phase": phase, "status": status})
 
 
 async def wait_until(cond: Callable[[], Any], timeout: float, interval: float = 0.2) -> bool:
@@ -91,7 +100,7 @@ class FaultSimulator:
         "stale_data": ("Stale market data", "Market feed freezes; prices stop updating"),
     }
     # need the local simulator: a real exchange cannot be told to fill only 40% of an order
-    SIMULATOR_ONLY = {"partial_fill"}
+    SIMULATOR_ONLY: set[str] = set()  # partial fill is simulated at the 021 adapter boundary (fills held back)
     # (scenario, target strategy) - spread across strategies so per-strategy order-rate limits stay meaningful
     CHAOS_PLAN = [("high_latency", "macd"), ("network_timeout", "rsi_ema"), ("duplicate_order", "breakout"),
                   ("position_mismatch", "macd"), ("partial_fill", "rsi_ema")]
@@ -258,6 +267,7 @@ class FaultSimulator:
                                       run_group=run_group, correlation_id=corr))
             self.active = {"run_id": str(run_id), "scenario": scenario}
             tl = Timeline(self, run_id, scenario, corr)
+            tl.strategy_id = params.get("strategy_id") if params.get("strategy_id") in self.sys.strategies.runtimes else None
             await self.sys.audit.record("FAULT_INJECTION_STARTED", f"fault scenario '{self.SCENARIOS[scenario][0]}' started by {actor}",
                                         source="FaultSimulator", severity="WARN", actor=actor, correlation_id=corr,
                                         payload={"scenario": scenario, "params": params})
@@ -369,7 +379,10 @@ class FaultSimulator:
         f.partial_next, f.partial_ratio, f.partial_hold_s = 1, Decimal("0.4"), 4.0
         qty = Decimal(int(p.get("quantity", 50)))
         before = self._pos(sid)
-        await tl.step(INJECT, "Liquidity shortage armed", "next order can only fill 40% for 4s", "warn")
+        await tl.step(INJECT, "Liquidity shortage armed",
+                      "next order can only fill 40% for 4s" if self.sys.is_paper else
+                      "next order: the 021 adapter reports only 40% of its fills for 4 s (execution reports held back at "
+                      "the broker boundary; 021 itself fills normally)", "warn")
         res = await self._test_order(sid, qty, "order into thin liquidity", corr=tl.corr)
         o = await self._reached_broker(tl, res)
         ok = await wait_until(lambda: (self.sys.orders.open_orders.get(o["id"]) and

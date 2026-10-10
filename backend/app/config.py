@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     symbols: str = "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,BHARTIARTL,ITC,LT,KOTAKBANK,AXISBANK,HINDUNILVR,BAJFINANCE,MARUTI,SUNPHARMA"
     instruments_dir: str = "data/instruments"  # daily cache of GET /instruments
     # subscriptions created for the first ADMIN at startup (presets in engine/strategy_engine.py)
-    default_strategies: str = "time_entry,open_breakout,ema_trend"
+    default_strategies: str = "time_entry,open_breakout,macd"
     strategy_clock: bool = True  # 1-second scheduler: clock-driven entries and the 15:15 IST square-off
     charges_table_path: str = "data/charges.json"  # published charges table (L2 net P&L)
 

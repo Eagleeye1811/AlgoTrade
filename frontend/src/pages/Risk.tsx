@@ -1,19 +1,15 @@
-import { Fragment, useState } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/auth'
 import { useApi } from '../hooks/useEvents'
 import { api } from '../services/api'
-import { fmtNum, fmtTime } from '../services/format'
-import RiskChecks from '../components/RiskChecks'
+import { fmtNum } from '../services/format'
 import RiskAdvisor from '../components/RiskAdvisor'
-import { Empty, ErrorText, Loading, Meter, Panel, StatusBadge } from '../components/ui'
+import { ErrorText, Loading, Meter, Panel, StatusBadge } from '../components/ui'
 
 export default function Risk() {
   const { user } = useAuth()
   const risk = useApi<any>('/risk', ['risk.decision', 'pnl.update', 'strategy.status'], 2000)
-  const [decision, setDecision] = useState('')
-  const events = useApi<any[]>(`/risk/events?limit=100${decision ? `&decision=${decision}` : ''}`, ['risk.decision'], 800)
-  const [open, setOpen] = useState<number | null>(null)
   const d = risk.data
   if (!d) return risk.error ? <ErrorText error={risk.error} /> : <Loading />
   const g = d.guard
@@ -46,21 +42,6 @@ export default function Risk() {
         ))}
       </div>
       <Limits limits={d.limits} admin={user?.role === 'ADMIN'} onSaved={risk.reload} />
-      <Panel title="Recent risk decisions" right={<select className="input" value={decision} onChange={(e) => setDecision(e.target.value)}><option value="">All</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option></select>}>
-        {!events.data ? <Loading /> : events.data.length === 0 ? <Empty>No risk decisions yet</Empty> : (
-          <div className="overflow-x-auto"><table className="tbl"><thead><tr><th>Time</th><th>Decision</th><th>Strategy</th><th>Rule</th><th>Actual</th><th>Allowed</th><th>Message</th><th></th></tr></thead>
-            <tbody>{events.data.map((r) => (
-              <Fragment key={r.id}>
-                <tr className="clickable" onClick={() => setOpen(open === r.id ? null : r.id)}>
-                  <td className="num text-muted">{fmtTime(r.created_at)}</td><td><StatusBadge status={r.decision} /></td><td>{r.strategy_id}</td>
-                  <td className="font-mono text-[11px]">{r.rule || '—'}</td><td className="num">{r.actual || '—'}</td><td className="num">{r.allowed || '—'}</td>
-                  <td className="max-w-[420px] truncate" title={r.message}>{r.message}</td>
-                  <td>{r.correlation_id && <Link className="text-info" to={`/audit?trace=${r.correlation_id}`} onClick={(e) => e.stopPropagation()}>trace</Link>}</td>
-                </tr>
-                {open === r.id && <tr><td colSpan={8} className="bg-bg p-2 whitespace-normal"><RiskChecks checks={r.checks} /></td></tr>}
-              </Fragment>))}</tbody></table></div>
-        )}
-      </Panel>
     </div>
   )
 }
@@ -140,13 +121,36 @@ function Limits({ limits, admin, onSaved }: { limits: any; admin: boolean; onSav
         <button className="btn" onClick={() => save(scope, sid, l.name, key)}>Save</button><button className="btn" onClick={() => setEdit((e) => { const n = { ...e }; delete n[key]; return n })}>×</button></span>
     ) : <button className="num underline decoration-dotted hover:text-white" onClick={() => setEdit({ ...edit, [key]: String(l.value) })}>{fmtNum(l.value)}</button>
   }
+  // per strategy: one row, one column per limit (the problem statement's three first)
+  const COLS: [string, string][] = [['max_daily_loss', 'Max loss / day (₹)'], ['max_position', 'Max position (shares)'],
+    ['max_orders_per_min', 'Max orders / min'], ['max_exposure', 'Max exposure (₹)']]
+  const sids = Object.keys(limits.strategy)
   return (
-    <Panel title={`Risk limits${admin ? ' (click a value to edit — ADMIN)' : ''}`} bodyClass="grid gap-3 p-3 lg:grid-cols-2">
+    <Panel title={`Risk limits${admin ? ' · click a value to edit' : ''}`} bodyClass="space-y-4 p-3">
       <ErrorText error={err} />
-      <table className="tbl"><thead><tr><th>Global limit</th><th>Value</th></tr></thead>
-        <tbody>{limits.global.map((l: any) => <tr key={l.name}><td>{l.label}</td><td>{cell('GLOBAL', null, l)}</td></tr>)}</tbody></table>
-      <table className="tbl"><thead><tr><th>Strategy</th><th>Limit</th><th>Value</th></tr></thead>
-        <tbody>{Object.entries(limits.strategy).flatMap(([sid, ls]: any) => ls.map((l: any) => <tr key={sid + l.name}><td>{sid}</td><td>{l.label}</td><td>{cell('STRATEGY', sid, l)}</td></tr>))}</tbody></table>
+      <div>
+        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Per strategy</div>
+        <div className="overflow-x-auto"><table className="tbl">
+          <thead><tr><th>Strategy</th>{COLS.map(([, l]) => <th key={l} className="text-right">{l}</th>)}</tr></thead>
+          <tbody>{sids.map((sid) => {
+            const byName = Object.fromEntries((limits.strategy[sid] as any[]).map((l) => [l.name, l]))
+            return (
+              <tr key={sid}><td className="font-medium whitespace-nowrap">{sid}</td>
+                {COLS.map(([n]) => <td key={n} className="text-right">{byName[n] ? <span className="inline-flex justify-end">{cell('STRATEGY', sid, byName[n])}</span> : '—'}</td>)}</tr>
+            )
+          })}</tbody>
+        </table></div>
+      </div>
+      <div>
+        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">Whole account</div>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {limits.global.map((l: any) => (
+            <div key={l.name} className="flex items-center justify-between gap-3 rounded border border-line bg-bg px-3 py-2 text-xs">
+              <span className="text-muted">{l.label}</span>{cell('GLOBAL', null, l)}
+            </div>
+          ))}
+        </div>
+      </div>
     </Panel>
   )
 }

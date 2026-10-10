@@ -204,3 +204,25 @@ def test_trade_time_reads_the_sandbox_shifted_epoch():
     assert trade_time(int(real.timestamp()), now) == real                     # plain Unix seconds
     assert trade_time(int(real.timestamp()) - EPOCH_1980_IST, now) == real   # seconds since 1980
     assert trade_time(None, now).timestamp() == now and trade_time("x", now).timestamp() == now
+
+
+def test_partial_fill_hold_splits_and_releases_fills():
+    """Partial-fill simulation on 021: 40% of the order is reported first (a trade is split if needed, the first
+    part keeping 021's trade id), the rest after the hold; the total equals 021's fills exactly."""
+    import time as _t
+    from datetime import datetime, timezone
+    from decimal import Decimal as D
+    from app.brokers.base import ExecutionReport
+    from app.brokers.o21_adapter import O21Adapter
+    a = O21Adapter.__new__(O21Adapter)
+    a._split_done = {}
+    hold = {"allowed": D(4), "release_at": _t.time() + 60, "emitted": D(0)}
+    rep = ExecutionReport("021-77", "9", "AT-1", "RELIANCE", "BUY", D(10), D(1170), D(1170), 0,
+                          datetime.now(timezone.utc), D(10), D(10))
+    first = a._held(hold, rep)
+    assert first.fill_id == "021-77" and first.quantity == 4 and first.cumulative_filled == 4
+    assert a._held(hold, rep) is None          # still held
+    hold["allowed"] = None                     # released
+    rest = a._held(hold, rep)
+    assert rest.fill_id == "021-77/2" and rest.quantity == 6 and rest.cumulative_filled == 10
+    assert a._held(hold, rep) is None

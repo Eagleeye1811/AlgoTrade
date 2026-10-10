@@ -106,6 +106,12 @@ class Reconciler:
                 "reconciliation": await self.run("BASELINE")}
 
     async def run(self, trigger: str, correlation_id: str | None = None) -> dict[str, Any]:
+        # a partial-fill injection holds back reported fills for a few seconds on purpose: platform and broker
+        # positions differ by design meanwhile, so wait for it to end instead of reporting a mismatch
+        for _ in range(40):
+            if not getattr(self.sys.broker.adapter, "holding_fills", False):
+                break
+            await asyncio.sleep(0.25)
         async with self._lock:
             try:
                 return await self._run(trigger, correlation_id or new_id())

@@ -19,7 +19,9 @@ function AuditList({ onTrace }: { onTrace: (id: string) => void }) {
   const [q, setQ] = useState('')
   const [query, setQuery] = useState('')
   const qs = new URLSearchParams({ limit: '300', ...(type ? { event_type: type } : {}), ...(sev ? { severity: sev } : {}), ...(query ? { q: query } : {}) })
-  const list = useApi<any[]>(`/audit?${qs}`, ['audit.event'], 1500)
+  // refresh within ~0.3 s of anything that writes to the audit trail (incl. Fault Lab steps, orders, fills, risk)
+  const list = useApi<any[]>(`/audit?${qs}`, ['audit.event', 'fault.step', 'fault.completed', 'order.update', 'fill.received',
+    'risk.decision', 'kill_switch.update', 'reconciliation.completed', 'strategy.status'], 300)
   const types = Array.from(new Set((list.data || []).map((e) => e.event_type))).sort()
   return (
     <div className="space-y-3">
