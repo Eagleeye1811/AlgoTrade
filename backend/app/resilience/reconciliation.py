@@ -208,7 +208,13 @@ class Reconciler:
                     sys.orders.open_orders.pop(oid, None)
         async with sys.db.session() as s:
             all_ids = set((await s.execute(select(Order.client_order_id))).scalars())
+        unnumbered = 0
         for bo in b_orders:
+            if str(bo.broker_order_id or "0") == "0" and not bo.filled_quantity:
+                # 021 lists orders it rejected before numbering them with orderId 0; nothing filled, no effect on
+                # positions, and they cannot be matched to anything - informational, never a reason to block
+                unnumbered += 1
+                continue
             if bo.client_order_id not in all_ids and bo.broker_order_id not in ext["orders"]:
                 unresolved.append({"type": "ORPHAN_BROKER_ORDER",
                                    "detail": f"broker order {bo.broker_order_id} ({bo.side} {bo.quantity} {bo.symbol}) has no internal record"})
@@ -260,7 +266,7 @@ class Reconciler:
         summary = {MATCHED: "internal state matches broker", RESOLVED: f"{len(mismatches)} mismatch(es) detected and repaired "
                    "from broker executions", UNRESOLVED: f"{len(unresolved)} unresolved mismatch(es) - new orders BLOCKED"}[status]
         details = {"comparison": comparison, "account": account, "unresolved": unresolved,
-                   "broker_orders": len(b_orders), "broker_fills": len(b_fills),
+                   "broker_orders": len(b_orders), "broker_fills": len(b_fills), "unnumbered_rejected_at_broker": unnumbered,
                    "external_acknowledged": {"fills": sum(1 for f in b_fills if f.fill_id in ext["fills"]),
                                              "orders": sum(1 for o in b_orders if o.broker_order_id in ext["orders"])}}
         await self._finish(rec.id, status, mismatches, actions, summary, details)

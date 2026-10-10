@@ -7,6 +7,8 @@ import { api } from '../services/api'
 import { fmtINR, fmtNum, fmtQty, fmtSigned, pnlClass } from '../services/format'
 import StrategyConfigModal from '../components/StrategyConfigModal'
 import SubscribeModal from '../components/SubscribeModal'
+import StrategyChartModal from '../components/StrategyChartModal'
+import { LineChart } from 'lucide-react'
 import { Empty, ErrorText, JsonKV, Loading, Panel, Side, StatusBadge } from '../components/ui'
 
 export default function Strategies() {
@@ -16,6 +18,7 @@ export default function Strategies() {
     ['strategy.update', 'strategy.status', 'strategy.config', 'position.update', 'pnl.update', 'strategy.signal'], 1500)
   const [cfg, setCfg] = useState<any>(null)
   const [sub, setSub] = useState(false)
+  const [chartOf, setChartOf] = useState<any>(null)
   const [err, setErr] = useState<string | null>(null)
   const act = async (fn: () => Promise<unknown>) => { setErr(null); try { await fn(); reload() } catch (e: any) { setErr(e.message) } }
   const canManage = (s: any) => user?.role === 'ADMIN' || s.user_id === user?.id
@@ -64,6 +67,7 @@ export default function Strategies() {
               <div><div className="mb-0.5 text-muted">Parameters (v{s.config_version})</div><JsonKV data={s.params} /></div>
               <div className="flex flex-wrap gap-2 pt-1">
                 <Link className="btn btn-primary" to={`/strategies/${s.id}`}>Details</Link>
+                <button className="btn" onClick={() => setChartOf(s)}><LineChart size={13} /> Chart</button>
                 {canManage(s) && <>
                   <button className="btn" onClick={() => act(() => api.post(`/strategies/${s.id}/${s.status === 'RUNNING' ? 'pause' : 'resume'}`))}>{s.status === 'RUNNING' ? 'Pause' : 'Resume'}</button>
                   <button className="btn" onClick={() => setCfg(s)}>Configure</button>
@@ -75,6 +79,7 @@ export default function Strategies() {
         </div>
       )}
       <StrategyConfigModal strategy={cfg} open={!!cfg} onClose={() => setCfg(null)} onSaved={reload} />
+      <StrategyChartModal strategy={chartOf} onClose={() => setChartOf(null)} />
       <SubscribeModal open={sub} onClose={() => setSub(false)} onDone={() => { setScope('mine'); reload() }} />
     </div>
   )

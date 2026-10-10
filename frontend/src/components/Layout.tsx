@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Activity, AlertOctagon, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Receipt, Settings, ShieldCheck, Wallet } from 'lucide-react'
+import { Activity, AlertOctagon, BookOpen, Bug, CandlestickChart, LayoutDashboard, ListOrdered, LogOut, Pause, Play, Settings, ShieldCheck, Wallet } from 'lucide-react'
 import { useAuth } from '../hooks/auth'
 import { useSystem } from '../hooks/system'
 import { useWsStatus } from '../hooks/useEvents'

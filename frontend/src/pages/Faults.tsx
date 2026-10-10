@@ -7,7 +7,7 @@ import { fmtTime } from '../services/format'
 import FaultTimeline from '../components/FaultTimeline'
 import IncidentConsole from '../components/IncidentConsole'
 import { Bot } from 'lucide-react'
-import { Badge, Empty, ErrorText, Loading, Modal, Panel, StatusBadge } from '../components/ui'
+import { Badge, Empty, ErrorText, Loading, Panel, StatusBadge } from '../components/ui'
 
 interface LiveRun { run_id: string; scenario: string; steps: any[]; status: string; outcome?: string }
 
@@ -16,8 +16,6 @@ export default function Faults() {
   const { overview } = useSystem()
   const sc = useApi<any>('/faults/scenarios', ['fault.completed', 'chaos.completed', 'chaos.started'], 500)
   const runs = useApi<any[]>('/faults/runs?limit=30', ['fault.completed'], 500)
-  const demo = useApi<any>('/demo')
-  useEvents(['demo.update'], (e) => demo.setData(e.payload))
   const [live, setLive] = useState<LiveRun | null>(null)
   const [chaos, setChaos] = useState<any>(null)
   const strategies = useApi<any[]>('/strategies', ['strategy.status'], 2000)
@@ -26,7 +24,6 @@ export default function Faults() {
   const firstRunning = strategies.data?.find((x: any) => x.status === 'RUNNING')?.id || strategies.data?.[0]?.id || ''
   const targetFor = (key: string) => targets[key] || firstRunning
   const [err, setErr] = useState<string | null>(null)
-  const [resetOpen, setResetOpen] = useState(false)
   const [openRun, setOpenRun] = useState<string | null>(null)
   useEvents(['fault.step'], (e) => setLive((r) => {
     const p = e.payload
@@ -51,7 +48,7 @@ export default function Faults() {
     runs.reload()
   }
 
-  const call = async (path: string, body?: any) => { setErr(null); try { await api.post(path, body); sc.reload(); demo.reload() } catch (e: any) { setErr(e.message) } }
+  const call = async (path: string, body?: any) => { setErr(null); try { await api.post(path, body); sc.reload() } catch (e: any) { setErr(e.message) } }
   const busy = !!sc.data?.active || sc.data?.chaos_running
   const titles: Record<string, string> = Object.fromEntries((sc.data?.scenarios || []).map((s: any) => [s.key, s.title]))
   const trading = overview?.trading
@@ -61,28 +58,6 @@ export default function Faults() {
       <div className="text-xs text-muted">Every scenario injects a real fault into a real component (021 broker adapter boundary, market feed, strategy logic, internal state) and the timeline is built from what the engine actually did.
         Test orders go through the full Signal → Risk → Order → Broker path, so trading must be <b>RUNNING</b> {trading && <>— currently <StatusBadge status={trading.status} /></>}.</div>
       <ErrorText error={err} />
-
-      <Panel title="Demo mode — scripted judge walkthrough on the real engine" right={<StatusBadge status={demo.data?.status} />} bodyClass="p-3 space-y-3">
-        <div className="flex flex-wrap gap-2">
-          <button className="btn btn-green" disabled={demo.data?.status === 'RUNNING' || demo.data?.status === 'PAUSED' || demo.data?.status === 'PAUSING'} onClick={() => call('/demo/start')}>Start demo</button>
-          {demo.data?.status === 'RUNNING' && <button className="btn" onClick={() => call('/demo/pause')}>Pause demo</button>}
-          {(demo.data?.status === 'PAUSED' || demo.data?.status === 'PAUSING') && <button className="btn" onClick={() => call('/demo/resume')}>Resume demo</button>}
-          {user?.role === 'ADMIN' && <button className="btn btn-danger" onClick={() => setResetOpen(true)}>Reset demo</button>}
-        </div>
-        {demo.data && (
-          <ol className="grid gap-1.5 text-xs sm:grid-cols-2 xl:grid-cols-3">
-            {demo.data.plan.map((p: any, i: number) => {
-              const st = demo.data.steps.find((s: any) => s.key === p.key)
-              return (
-                <li key={p.key} className={`rounded border p-2 ${st?.status === 'done' ? 'border-green-500/40' : st?.status === 'failed' ? 'border-red-500/40' : st?.status === 'running' ? 'border-blue-500/50 animate-pulse' : 'border-line'}`}>
-                  <div className="flex items-center justify-between gap-2"><span className="font-semibold">{i + 1}. {p.title}</span>{st ? <StatusBadge status={st.status} /> : <Badge>pending</Badge>}</div>
-                  <div className="text-muted">{st?.detail || p.description}</div>
-                </li>
-              )
-            })}
-          </ol>
-        )}
-      </Panel>
 
       <Panel title="Inject a fault" right={<div className="flex items-center gap-2">
           <button title="After every fault: reconcile with 021, check broker / market data / blocks / SAFE MODE, and resume trading only if everything passes"
@@ -164,11 +139,6 @@ export default function Faults() {
         )}
       </Panel>
 
-      <Modal open={resetOpen} onClose={() => setResetOpen(false)} title="Reset demo"
-        footer={<><button className="btn" onClick={() => setResetOpen(false)}>Cancel</button><button className="btn btn-danger" onClick={async () => { setResetOpen(false); await call('/demo/reset') }}>Wipe & reset</button></>}>
-        <p className="text-sm">This permanently deletes all orders, fills, positions, signals, risk/reconciliation events, fault runs and the audit trail, and the platform's own trading history. The 021 account must be flat first (its orders stay in 021's order book).</p>
-        <p className="text-xs text-muted">Users, strategies, configurations and risk limits are kept. Trading will be PAUSED afterwards.</p>
-      </Modal>
     </div>
   )
 }

@@ -41,6 +41,20 @@ def _largest_position(sys: TradingSystem) -> dict:
     return meter(f"Max position size ({best[3]})", best[1], best[2], "shares")
 
 
+async def _busiest_orders(sys: TradingSystem) -> dict:
+    """Max orders per minute: the strategy closest to its own per-strategy limit (the limit the AI Risk Advisor
+    applies), so this meter shows the applied value."""
+    best = None
+    for sid in sys.strategies.runtimes:
+        n, mx = await sys.redis.count_in_window(f"orders:{sid}", 60), sys.limits.s(sid, "max_orders_per_min")
+        r = n / float(mx) if mx else 0.0
+        if best is None or r > best[0]:
+            best = (r, n, mx, sid)
+    if best is None:
+        return meter("Max orders per minute", 0, 0, "orders")
+    return meter(f"Max orders per minute ({best[3]})", best[1], best[2], "orders")
+
+
 @router.get("")
 async def risk_overview(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
     snap = sys.pnl.compute()
@@ -51,7 +65,7 @@ async def risk_overview(_: User = Depends(current_user), sys: TradingSystem = De
     portfolio = [
         meter("Daily loss", loss, lim.g("max_daily_loss"), "INR"),
         _largest_position(sys),
-        meter("Orders per minute (last 60s)", g_orders, lim.g("max_orders_per_min"), "orders"),
+        await _busiest_orders(sys),
     ]
     strategies = {}
     for sid, rt in sys.strategies.runtimes.items():

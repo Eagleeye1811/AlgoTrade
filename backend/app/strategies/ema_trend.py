@@ -71,4 +71,8 @@ class EmaTrendStrategy(Strategy):
 
     def series(self):
         f, s = self._calc()
-        return {"ema_fast": self._series(f), "ema_slow": self._series(s)}
+        closes5 = [float(b.close) for b in self.bars5]
+        t = ema(closes5, self.params["trend_period"])
+        # the trend EMA of a 5m candle is known once that candle closes (its start + 5 minutes)
+        trend = [{"time": int(b.ts.timestamp()) + 300, "value": round(v, 4)} for b, v in zip(self.bars5, t) if v is not None]
+        return {"ema_fast": self._series(f), "ema_slow": self._series(s), "trend_5m": trend}

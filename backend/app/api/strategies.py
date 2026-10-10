@@ -123,7 +123,8 @@ async def chart(sid: str, limit: int = Query(300, le=600), _: User = Depends(cur
     rt = _rt(sys, sid)
     sym = rt.symbol
     inst = rt.instance
-    bars = inst.bars[-limit:]
+    # clock/tick strategies do not consume candles: chart the market's own candles for them
+    bars = inst.bars[-limit:] if inst.uses_candles else sys.market.candles.candles(sym, rt.timeframe, limit, include_working=False)
     since = bars[0].ts if bars else None
     series: dict[str, Any] = inst.series()
     t0 = int(since.timestamp()) if since else 0
@@ -142,7 +143,30 @@ async def chart(sid: str, limit: int = Query(300, le=600), _: User = Depends(cur
         "markers": [{"time": int(x.candle_time.timestamp()), "signal": x.signal, "action": x.action, "price": x.price,
                      "reason": x.reason} for x in sigs],
         "fills": [{"side": f.side, "quantity": f.quantity, "price": f.price, "at": f.filled_at.isoformat()} for f in fills],
+        "levels": _chart_levels(sys, rt),
     }
+
+
+def _chart_levels(sys: TradingSystem, rt) -> list[dict[str, Any]]:
+    """Horizontal price levels for the strategy chart: the open-breakout triggers, and the open position's entry,
+    stop-loss and target (the same levels the platform acts on)."""
+    out: list[dict[str, Any]] = []
+    if rt.kind == "OPEN_BREAKOUT":
+        o = sys.market.session_open(rt.symbol)
+        if o:
+            b = Decimal(str(rt.params.get("breakout_pct", 1))) / 100
+            out += [{"key": "open", "label": "Today's open", "price": o},
+                    {"key": "buy_trigger", "label": f"Buy ≥ +{rt.params.get('breakout_pct')}%", "price": (o * (1 + b)).quantize(Decimal("0.01"))},
+                    {"key": "sell_trigger", "label": f"Sell ≤ −{rt.params.get('breakout_pct')}%", "price": (o * (1 - b)).quantize(Decimal("0.01"))}]
+    pos = sys.positions.get(rt.id, rt.symbol)
+    if pos.quantity != 0 and pos.avg_price > 0:
+        out.append({"key": "entry", "label": f"Entry {'LONG' if pos.quantity > 0 else 'SHORT'} {abs(pos.quantity):,.0f}", "price": pos.avg_price})
+        lv = sys.strategies.exit_levels(rt)
+        if lv["stop_loss"] is not None:
+            out.append({"key": "stop_loss", "label": f"Stop-loss {rt.params.get('stop_loss_pct')}%", "price": lv["stop_loss"]})
+        if lv["take_profit"] is not None:
+            out.append({"key": "take_profit", "label": f"Target {rt.params.get('take_profit_pct')}%", "price": lv["take_profit"]})
+    return out
 
 
 @router.post("/{sid}/pause")

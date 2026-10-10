@@ -142,7 +142,8 @@ class O21MarketProvider(MarketDataProvider):
     candles built from exchange-timed 021 ticks, set via `set_replay`) is replayed in real time: each candle becomes
     four ticks (open, low/high, high/low, close; `replay_step_s` apart, so one candle per minute at the default 15 s),
     stamped with the replay time and with source "021-replay". It loops at the end of the session. Sandbox packets are
-    ignored meanwhile. Exchange-timed packets take over again as soon as one passes the filter.
+    ignored meanwhile, and so are exchange-timed packets the sandbox streams outside NSE hours (its own simulated
+    session, e.g. at weekends): live data takes over when one passes the filter during the NSE session.
     The socket is re-opened with a fresh ephemeral key after any drop (021 restarts all sockets at 08:00 IST and
     does not remember subscriptions), with exponential backoff.
     """
@@ -172,7 +173,8 @@ class O21MarketProvider(MarketDataProvider):
         self._last_price: dict[str, Decimal] = {}
         self.last_packet: dict[str, list[dict]] = {}  # diagnostics: latest raw packets per symbol
         self._newest: dict[str, tuple[datetime, int]] = {}  # symbol -> (last-trade time, volume) last accepted
-        self.rejected: dict[str, int] = {"older_than_accepted": 0, "volume_decreased": 0, "no_trade_time": 0}
+        self.rejected: dict[str, int] = {"older_than_accepted": 0, "volume_decreased": 0, "no_trade_time": 0,
+                                         "outside_session": 0}
 
     async def _run(self) -> None:
         backoff = 1.0
@@ -231,6 +233,11 @@ class O21MarketProvider(MarketDataProvider):
         if not self._accept(sym, p):
             if self._quiet(sym) and p.ltp and not self._replaying(sym):
                 await self._on_sandbox_packet(sym, p)
+            return
+        if self.replay_enabled and self.replay_bars.get(sym) and not self.market_open():
+            # outside NSE hours the sandbox may stream its own simulated session (seen on a Saturday, ~10% away from
+            # the last real prices): the recorded session replay stays in charge until the real session opens
+            self.rejected["outside_session"] += 1
             return
         self._last_exchange[sym] = time.monotonic()
         self.after_hours.pop(sym, None)

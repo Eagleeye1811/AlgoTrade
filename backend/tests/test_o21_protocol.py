@@ -127,7 +127,7 @@ async def test_market_provider_rejects_stale_interleaved_packets():
     assert ticks[1].volume == 0  # first packet of a new trade day: no volume carried over from the stale stream
     assert ticks[-1].volume == D(185) and ticks[-1].ts == live.replace(second=32)
     assert p.day["TCS"].open == D("2086.00") and p.day["TCS"].prev_close == D("2076.00")  # today's session
-    assert p.rejected == {"older_than_accepted": 2, "volume_decreased": 1, "no_trade_time": 0}
+    assert p.rejected == {"older_than_accepted": 2, "volume_decreased": 1, "no_trade_time": 0, "outside_session": 0}
 
 
 async def test_sandbox_stream_fallback_after_hours():
@@ -223,3 +223,34 @@ async def test_after_hours_replay_of_the_recorded_021_session():
     # a real exchange-timed packet ends the after-hours stream
     await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=117100, volume=5100, last_trade_time=t0.replace(minute=9)))
     assert ticks[-1].source == "021" and "RELIANCE" not in p.after_hours
+
+
+async def test_sandbox_session_outside_nse_hours_does_not_replace_the_replay():
+    """Seen on a Saturday: the sandbox streamed fresh-timed packets ~10% away from the last real prices. Outside NSE
+    hours the recorded-session replay stays in charge; during the session live data wins."""
+    import time as _t
+    from datetime import date
+    from decimal import Decimal as D
+    from app.brokers.o21_protocol import MarketPacket
+    from app.market.models import Bar
+    from app.market.providers import O21MarketProvider
+    is_open = {"v": False}
+    p = O21MarketProvider(["RELIANCE"], None, None, "wss://unused", sandbox_after_s=20, replay=True,
+                          market_open=lambda: is_open["v"])
+    ticks = []
+
+    async def on_tick(t):
+        ticks.append(t)
+    p.on_tick = on_tick
+    t0 = datetime(2026, 10, 9, 8, 4, tzinfo=timezone.utc)
+    p.set_replay({"RELIANCE": [Bar("RELIANCE", t0, D("1170"), D("1172"), D("1169"), D("1171"), D(400))]}, date(2026, 10, 9))
+    p._last_exchange["RELIANCE"] = _t.monotonic() - 21
+    sat = datetime(2026, 10, 10, 5, 46, 32, tzinfo=timezone.utc)
+    await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=128700, open=128730, volume=4242987, last_trade_time=sat))
+    assert ticks == [] and p.rejected["outside_session"] == 1 and "RELIANCE" not in p.day
+    await p.replay_step()
+    assert ticks[-1].source == "021-replay" and ticks[-1].price == D("1170")
+    is_open["v"] = True
+    await p._on_packet("RELIANCE", MarketPacket(3, 1, 1, ltp=128710, open=128730, volume=4243000,
+                                                last_trade_time=sat.replace(second=40)))
+    assert ticks[-1].source == "021" and ticks[-1].price == D("1287.10")

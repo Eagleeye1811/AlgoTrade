@@ -205,7 +205,7 @@ account capital in total.
 
 *Partial fill* needs the local simulator and is disabled on 021. On 021, scenarios place real sandbox orders, with
 test quantities capped at the strategy's max position. Each scenario has its own target-strategy picker and Inject
-button. Demo mode runs a scripted walkthrough, and chaos mode runs several scenarios back to back.
+button. Chaos mode runs several scenarios back to back.
 
 **Live incident console.** While a fault runs, the page shows:
 - a running stopwatch;
@@ -261,7 +261,7 @@ uses long polling (`getUpdates`), so it needs no public URL.
 | **Positions** | Per-strategy and per-stock positions and P&L |
 | **Risk** | Limit meters, manual limits, AI Risk Advisor, per-strategy risk cards, the latency/slippage guard, the risk-decision log |
 | **Reconciliation & Health** | Component health, reconciliation runs, 021 state compared with internal state, acknowledgement of external trades |
-| **Fault Simulation** | Fault Lab, demo mode, chaos mode, incident console, autopilot, run history |
+| **Fault Simulation** | Fault Lab, chaos mode, incident console, autopilot, run history |
 | **Audit Trail** | Every event with severity, source, strategy and actor; trace by correlation ID |
 | **Settings / Account** | Trading account, market-data status, users and roles, Telegram copilot |
 

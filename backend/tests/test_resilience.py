@@ -360,3 +360,18 @@ async def test_autopilot_never_overrides_safe_mode(trading, monkeypatch):
     titles = [s["title"] for s in res["steps"] if s["phase"] == "AUTOPILOT"]
     assert "Autopilot stands down - human action required" in titles
     assert sys_.controller.status == "SAFE_MODE"
+
+
+async def test_orders_rejected_by_the_broker_before_numbering_do_not_block(trading, monkeypatch):
+    """021 lists orders its RMS rejected with orderId 0: unmatchable, nothing filled - reported, never blocking."""
+    sys_ = trading
+    from app.brokers.base import BrokerOrder
+    real = sys_.broker.adapter.get_orders
+
+    async def with_unnumbered():
+        return await real() + [BrokerOrder("0", "", "RELIANCE", "SELL", "MARKET", D(25), D(0), None, None, "REJECTED",
+                                           reject_reason="RMS")]
+    monkeypatch.setattr(sys_.broker.adapter, "get_orders", with_unnumbered)
+    rec = await sys_.reconciler.run("TEST")
+    assert rec["status"] == "MATCHED" and rec["details"]["unnumbered_rejected_at_broker"] == 1
+    assert "reconciliation" not in sys_.controller.blocks
