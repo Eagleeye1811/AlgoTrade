@@ -21,8 +21,9 @@ def account_view(sys: TradingSystem) -> dict:
         "account": None if a is None else {
             "id": a.id, "name": a.name, "account_type": a.account_type, "broker": a.broker,
             "broker_account_id": a.broker_account_id, "starting_capital": a.starting_capital, "created_at": a.created_at},
-        "execution_mode": "LOCAL SIMULATOR (tests)" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
-        "broker_note": ("Orders execute on the local simulator (automated tests)." if sys.is_paper else
+        "execution_mode": "PAPER TRADING - LOCAL SIMULATOR" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
+        "broker_note": ("Orders are filled by the local paper-trading simulator against the market feed. No real orders are placed "
+                        "and no real money is traded." if sys.is_paper else
                         "Orders go to the 021 developer sandbox (POST /orders): virtual funds on a simulated exchange. "
                         "No real money is traded."),
         "portfolio": snap["portfolio"],
@@ -66,7 +67,7 @@ async def overview(_: User = Depends(current_user), sys: TradingSystem = Depends
         "kill_switch": sys.kill_switch.snapshot(),
         "reconciliation": {"status": sys.reconciler.status, "last": sys.reconciler.last},
         "account_configured": sys.account is not None,
-        "execution_mode": "LOCAL SIMULATOR (tests)" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
+        "execution_mode": "PAPER TRADING - LOCAL SIMULATOR" if sys.is_paper else "021 DEVELOPER SANDBOX - SIMULATED EXCHANGE",
     }
 
 

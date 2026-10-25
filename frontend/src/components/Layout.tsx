@@ -96,7 +96,7 @@ function TopBar() {
           <img src="/logo.png" alt="AlgoTrade" className="h-6 w-6 rounded-full object-contain" />
           <span className="text-[15px] font-bold tracking-tight text-white">AlgoTrade</span>
         </div>
-        <Badge tone="purple">021 sandbox · simulated exchange</Badge>
+        {overview?.execution_mode && <Badge tone="purple">{overview.broker?.paper ? 'paper trading · no real orders' : '021 sandbox · simulated exchange'}</Badge>}
         <div className="flex items-center gap-1.5 text-xs" title={m?.source}>
           <span className="text-muted">Market</span><StatusBadge status={m?.display_status} />
         </div>

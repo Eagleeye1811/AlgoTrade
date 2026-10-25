@@ -24,9 +24,11 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:8080"
 
     # Venue and market data
-    #   broker_mode      "o21"  -> orders through the 021 developer API (POST /orders) - the runtime venue
-    #                    "paper" -> local simulator, used only by the automated test suite (forces faults on demand)
-    #   market_data_mode "o21"  -> 021 market-data websocket; "manual" -> test feed
+    #   broker_mode      "o21"    -> orders through the 021 developer API (POST /orders)
+    #                    "paper"  -> local paper-trading simulator (no real orders); also used by the test suite
+    #   market_data_mode "o21"    -> 021 market-data websocket
+    #                    "replay" -> latest recorded NSE session (Yahoo Finance 1m candles) replayed in real time
+    #                    "manual" -> test feed
     broker_mode: str = "o21"
     market_data_mode: str = "o21"
     symbols: str = "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN,BHARTIARTL,ITC,LT,KOTAKBANK,AXISBANK,HINDUNILVR,BAJFINANCE,MARUTI,SUNPHARMA"
@@ -55,6 +57,7 @@ class Settings(BaseSettings):
     after_hours_replay: bool = True
     replay_step_s: float = 15.0
     stale_after_s_manual: float = 6.0
+    replay_dir: str = "data/replay"  # cache of the Yahoo Finance 1m candles replayed in market_data_mode "replay"
 
     # Account: 021 gives ₹10,00,000 virtual funds, topped up every trading day
     starting_capital: Decimal = Decimal("1000000")
@@ -63,7 +66,7 @@ class Settings(BaseSettings):
     # on weekdays. False = trade at any time against the 021 sandbox (it runs after hours).
     enforce_market_hours: bool = False
 
-    # Paper broker simulator (broker_mode "paper", tests only)
+    # Paper broker simulator (broker_mode "paper")
     broker_seed: int = 7
     broker_base_latency_ms: int = 40
     broker_jitter_ms: int = 40

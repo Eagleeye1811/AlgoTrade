@@ -1,10 +1,11 @@
 """Market data providers behind one interface.
 
     MarketDataProvider
-    ├── O21MarketProvider  - 021 market-data websocket (binary "full" packets: LTP, OHLC, volume, trade time)
-    └── ManualProvider     - test-only feed driven explicitly by automated tests (mode "manual")
+    ├── O21MarketProvider   - 021 market-data websocket (binary "full" packets: LTP, OHLC, volume, trade time)
+    ├── YahooReplayProvider - replay of the latest recorded NSE session (Yahoo Finance 1m candles, mode "replay")
+    └── ManualProvider      - test-only feed driven explicitly by automated tests (mode "manual")
 
-Both emit the same Tick callbacks into the same Candle Engine -> Strategy pipeline: 1m and 5m candles are built
+All emit the same Tick callbacks into the same Candle Engine -> Strategy pipeline: 1m and 5m candles are built
 by the platform from these ticks.
 """
 from __future__ import annotations
@@ -17,9 +18,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, time as dtime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
+import httpx
 import websockets
 
 from app.brokers.o21_protocol import ProtocolError, parse_market_frame
@@ -376,6 +379,161 @@ class O21MarketProvider(MarketDataProvider):
                   "replay_enabled": self.replay_enabled, "replay_ticks": self.replay_ticks,
                   "replay_day": self.replay_day.isoformat() if self.replay_day else None,
                   "after_hours": {s: k for s, (k, _) in sorted(self.after_hours.items())}})
+        return d
+
+
+# --------------------------------------------------------------------------- recorded NSE sessions (Yahoo Finance)
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}.NS"
+YAHOO_REFETCH_S = 3600.0  # look for a newer session at most once an hour (when the replay wraps)
+
+
+def parse_yahoo_chart(symbol: str, data: dict) -> list[Bar]:
+    """1m bars from a Yahoo chart response; minutes without a trade (null OHLC) are skipped."""
+    res = ((data.get("chart") or {}).get("result") or [None])[0] or {}
+    q = ((res.get("indicators") or {}).get("quote") or [{}])[0]
+    rp = lambda x: Decimal(str(x)).quantize(Decimal("0.01"))  # noqa: E731
+    out = []
+    for ts, o, h, lo, c, v in zip(res.get("timestamp") or [], *(q.get(k) or [] for k in ("open", "high", "low", "close", "volume"))):
+        if None in (o, h, lo, c):
+            continue
+        out.append(Bar(symbol, datetime.fromtimestamp(ts, timezone.utc), rp(o), rp(h), rp(lo), rp(c), Decimal(int(v or 0))))
+    return out
+
+
+class YahooReplayProvider(MarketDataProvider):
+    """Replays the most recent complete NSE session of real 1m candles (Yahoo Finance chart endpoint, free, no
+    account; delayed/unofficial - development and paper trading only) in real time, at any hour.
+
+    Each candle becomes four ticks (open, low/high, high/low, close; `step_s` apart, so one candle per minute at the
+    default 15 s), stamped with the wall clock and with source "yahoo-replay"; the ticks carry the candle's real
+    high/low so the paper broker never fills outside it. The session open and the previous session's close are
+    published as the day's open / previous close. The replay loops at the end of the session, looking for a newer
+    session first. Responses are cached in `cache_dir` (data/replay/<SYMBOL>_1m.json, the format of
+    scripts/fetch_replay_data.py), so the feed also starts offline.
+    """
+    mode = "REPLAY"
+
+    def __init__(self, symbols: list[str], cache_dir: str, step_s: float = 15.0, fetch: Callable[[str], Awaitable[dict]] | None = None):
+        super().__init__(symbols)
+        self.cache_dir, self.step_s = Path(cache_dir), step_s
+        self.fetch = fetch or self._fetch_yahoo
+        self.replay_day = None
+        self.bars: dict[str, list[Bar]] = {}
+        self.prev_close: dict[str, Decimal] = {}
+        self.replay_ticks = 0
+        self._pos: dict[str, int] = {}
+        self._fetched_at = 0.0
+
+    @property
+    def source_name(self) -> str:  # type: ignore[override]
+        if self.replay_day is None:
+            return "Yahoo Finance 1m candles - recorded NSE session replay (not live)"
+        return f"Yahoo Finance 1m candles - replay of the NSE session of {self.replay_day:%d %b %Y} (not live)"
+
+    async def _fetch_yahoo(self, symbol: str) -> dict:
+        async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 (AlgoTrade)"}) as c:
+            r = await c.get(YAHOO_CHART_URL.format(sym=symbol), params={"interval": "1m", "range": "5d"})
+            r.raise_for_status()
+            return r.json()
+
+    async def load(self) -> None:
+        """Fetch (falling back to the cache) and select the latest complete session common to the symbols."""
+        self._fetched_at = time.monotonic()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        sessions: dict[str, dict] = {}
+        for sym in self.symbols:
+            path = self.cache_dir / f"{sym}_1m.json"
+            try:
+                data = await self.fetch(sym)
+                path.write_text(json.dumps(data))
+            except Exception as e:
+                self.last_error = f"Yahoo {sym}: {e}"
+                log.warning("Yahoo Finance %s: %s - using the cached copy", sym, e)
+                if not path.exists():
+                    continue
+                data = json.loads(path.read_text())
+            by_day: dict = {}
+            for b in parse_yahoo_chart(sym, data):
+                by_day.setdefault(b.ts.astimezone(IST).date(), []).append(b)
+            sessions[sym] = by_day
+        today = datetime.now(IST).date()
+        # a session still in progress (today, before 15:30 IST) is not complete: replay the one before it
+        complete = lambda d: d < today or datetime.now(IST).time() > dtime(15, 30)  # noqa: E731
+        days = {d for by_day in sessions.values() for d in by_day if complete(d)}
+        if not days:
+            raise RuntimeError("no recorded NSE session available (Yahoo Finance unreachable and no cached data)")
+        day = max(days)
+        bars, prev = {}, {}
+        for sym, by_day in sessions.items():
+            if by_day.get(day):
+                bars[sym] = by_day[day]
+                earlier = [d for d in by_day if d < day]
+                if earlier:
+                    prev[sym] = by_day[max(earlier)][-1].close
+        if day != self.replay_day:
+            self._pos.clear()
+        self.bars, self.prev_close, self.replay_day = bars, prev, day
+        for sym, bs in bars.items():
+            self.day[sym] = DayStats(open=bs[0].open, prev_close=prev.get(sym), trade_day=day)
+
+    async def _run(self) -> None:
+        backoff = 5.0
+        while not self.bars:
+            try:
+                await self._set_status(DELAYED, "loading recorded NSE sessions from Yahoo Finance")
+                await self.load()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.last_error = str(e)
+                await self._set_status(DISCONNECTED, str(e))
+                await asyncio.sleep(backoff)
+                backoff = min(300.0, backoff * 2)
+        await self._set_status(REPLAY, f"replaying {len(self.bars)} symbols")
+        while True:
+            # aligned to the wall clock (:00/:15/:30/:45 at 15 s) so each replayed candle opens on its minute
+            await asyncio.sleep(self.step_s - (time.time() % self.step_s) + 0.05)
+            try:
+                await self.step()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Yahoo replay step failed")
+
+    def ticks_of(self, b: Bar) -> list[tuple[Decimal, Decimal]]:
+        mid = (b.low, b.high) if b.close >= b.open else (b.high, b.low)
+        vol = b.volume / 4
+        return [(b.open, vol), (mid[0], vol), (mid[1], vol), (b.close, vol)]
+
+    async def step(self) -> None:
+        """Emit the next replayed tick for every symbol."""
+        if not self._paused.is_set() or time.time() < self.outage_until:
+            return
+        if self._pos and all(self._pos.get(s, 0) % (len(b) * 4) == 0 for s, b in self.bars.items()) \
+                and time.monotonic() - self._fetched_at > YAHOO_REFETCH_S:
+            try:  # end of the session: pick up a newer one if there is one
+                await self.load()
+            except Exception as e:
+                log.warning("Yahoo replay refresh failed: %s", e)
+        now = datetime.now(timezone.utc)
+        for sym, bars in self.bars.items():
+            i = self._pos.get(sym, 0) % (len(bars) * 4)
+            self._pos[sym] = i + 1
+            b = bars[i // 4]
+            price, vol = self.ticks_of(b)[i % 4]
+            d = self.day.setdefault(sym, DayStats())
+            if i == 0:  # the session restarts
+                d.high = d.low = None
+            d.high = max(d.high or b.high, b.high)
+            d.low = min(d.low or b.low, b.low)
+            self.replay_ticks += 1
+            if self.on_tick:
+                await self.on_tick(Tick(sym, now, price, vol, "yahoo-replay", b.high, b.low))
+
+    def info(self) -> dict:
+        d = super().info()
+        d.update({"replay_day": self.replay_day.isoformat() if self.replay_day else None,
+                  "replay_ticks": self.replay_ticks, "replay_step_s": self.step_s})
         return d
 
 

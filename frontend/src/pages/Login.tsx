@@ -26,7 +26,7 @@ export default function Login({ mode }: { mode: 'login' | 'register' }) {
           <img src="/logo.png" alt="AlgoTrade" className="h-8 w-8 rounded-full object-contain" />
           <span className="text-xl font-bold text-white">AlgoTrade</span>
         </div>
-        <p className="text-xs text-muted">Fault-tolerant algorithmic trading &amp; risk control · 021 developer sandbox (virtual funds, simulated exchange)</p>
+        <p className="text-xs text-muted">Fault-tolerant algorithmic trading &amp; risk control · paper trading (no real money)</p>
         <h1 className="pt-2 text-sm font-semibold">{mode === 'login' ? 'Sign in' : 'Create account'}</h1>
         {mode === 'register' && <input className="input w-full" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} required />}
         <input className="input w-full" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email" />

@@ -1,6 +1,7 @@
 """MarketDataService: runs the provider, feeds the Candle Engine, tracks freshness, fans out ticks.
 
-Modes: "o21" (021 market-data websocket, the only runtime source) and "manual" (automated tests).
+Modes: "o21" (021 market-data websocket), "replay" (latest recorded NSE session from Yahoo Finance, replayed in real
+time) and "manual" (automated tests).
 021 has no candle-history endpoint, so every candle the platform builds is persisted (market_bars, source
 "ticks") and the last days are reloaded at startup to warm indicators.
 """
@@ -22,7 +23,7 @@ from app.database.models import MarketBar
 from app.market.candle_engine import CandleEngine
 from app.market.models import DELAYED, DISCONNECTED, LIVE, REPLAY, STALE, STOPPED, Bar, Tick
 from app.market.providers import (IST, DayStats, ManualProvider, MarketDataProvider, O21MarketProvider,
-                                  nse_market_open)
+                                  YahooReplayProvider, nse_market_open)
 
 if TYPE_CHECKING:
     from app.engine.system import TradingSystem
@@ -33,6 +34,7 @@ HISTORY_DAYS = 3
 CLOSE_GRACE_S = 3.0
 SANDBOX_SOURCE = "021-sandbox"  # market_bars.source of candles built from the after-hours sandbox stream
 REPLAY_SOURCE = "021-replay"    # market_bars.source of candles built from the after-hours session replay
+YAHOO_REPLAY_SOURCE = "yahoo-replay"  # market_bars.source of candles built from the Yahoo session replay (mode "replay")
 AFTER_HOURS_SOURCES = {"sandbox": SANDBOX_SOURCE, "replay": REPLAY_SOURCE}
 SOURCE_KIND = {v: k for k, v in AFTER_HOURS_SOURCES.items()}
 REPLAY_LOOKBACK_DAYS = 10
@@ -60,8 +62,11 @@ class MarketDataService:
     # ------------------------------------------------------------------ lifecycle
     def _make_provider(self) -> MarketDataProvider:
         syms = self.settings.symbol_list
-        if self.settings.market_data_mode.lower() == "manual":
+        mode = self.settings.market_data_mode.lower()
+        if mode == "manual":
             return ManualProvider(syms)
+        if mode == "replay":
+            return YahooReplayProvider(syms, self.settings.replay_dir, self.settings.replay_step_s)
         return O21MarketProvider(syms, self.sys.o21, self.sys.instruments, self.settings.o21_ws_market_url,
                                  self.settings.o21_sandbox_stream_after_s, replay=self.settings.after_hours_replay,
                                  replay_step_s=self.settings.replay_step_s, market_open=lambda: self.is_market_open())
@@ -200,6 +205,8 @@ class MarketDataService:
             log.warning("could not persist candle %s %s: %s", symbol, bar.ts, e)
 
     def _bar_source(self, symbol: str, bar: Bar) -> str:
+        if isinstance(self.provider, YahooReplayProvider):
+            return YAHOO_REPLAY_SOURCE
         ah = self.after_hours(symbol)
         return AFTER_HOURS_SOURCES[ah[0]] if ah is not None and bar.ts + timedelta(minutes=1) > ah[1] else "ticks"
 
@@ -325,8 +332,9 @@ class MarketDataService:
     async def _watch(self) -> None:
         while True:
             try:
-                if isinstance(self.provider, O21MarketProvider):
+                if isinstance(self.provider, (O21MarketProvider, YahooReplayProvider)):
                     await self.close_due_candles()
+                if isinstance(self.provider, O21MarketProvider):
                     if not self.is_market_open() and time.monotonic() - self._replay_refreshed > 60:
                         self._replay_refreshed = time.monotonic()  # pick up the session that just ended
                         await self.refresh_replay()

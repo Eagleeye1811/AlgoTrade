@@ -182,10 +182,12 @@ class TradingSystem:
         else:
             await self.controller.unblock("account")
             try:
+                if self.is_paper:  # an account set up on another venue starts at the simulator with its starting capital
+                    await self.broker.adapter.open_account(self.account.broker_account_id, self.account.starting_capital)
                 await self.broker.call("connect", lambda: self.broker.adapter.connect(self.account.broker_account_id))
                 self.broker.start()
                 await rep("4. Connected to broker", f"{self.broker.adapter.name} account {self.account.broker_account_id} "
-                                                    f"({'local simulator' if self.is_paper else '021 sandbox - simulated exchange, virtual funds'})")
+                                                    f"({'paper trading simulator - no real orders' if self.is_paper else '021 sandbox - simulated exchange, virtual funds'})")
             except Exception as e:
                 await rep("4. Broker connection FAILED", str(e), "error")
             # 5. reconcile
