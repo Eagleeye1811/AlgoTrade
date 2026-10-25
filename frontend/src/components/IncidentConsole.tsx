@@ -14,7 +14,7 @@ const NODES = [
   { key: 'strategy', label: 'Strategy', icon: Activity, re: /strateg|signal|runaway|malfunction|halt/i },
   { key: 'risk', label: 'Risk Firewall', icon: ShieldCheck, re: /risk|firewall|rejected|circuit|rule|oversized|limit|blocked/i },
   { key: 'orders', label: 'Order Engine', icon: ListOrdered, re: /order|duplicate|idempoten|submission|uncertain/i },
-  { key: 'broker', label: '021 Broker', icon: Landmark, re: /broker|021|api|latency|timeout|outage|connection|reachable/i },
+  { key: 'broker', label: 'Broker', icon: Landmark, re: /broker|021|api|latency|timeout|outage|connection|reachable/i },
   { key: 'positions', label: 'Positions', icon: Wallet, re: /position|flatten|cache|fill/i },
   { key: 'recon', label: 'Reconciliation', icon: GitCompare, re: /reconcil|matches|mismatch/i },
   { key: 'engine', label: 'Trading engine', icon: Database, re: /trading|engine|restart|postgres|state|safe mode|resum|autopilot|checks/i },
@@ -100,7 +100,7 @@ export default function IncidentConsole({ run }: { run: Run; title?: string }) {
 
       {/* live system map */}
       <div className="rounded-lg border border-line bg-bg/60 p-3">
-        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">Live system map · signal → risk → order → 021, and the state keepers</div>
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">Live system map · signal → risk → order → broker, and the state keepers</div>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
           {NODES.map((n) => {
             const st = nodeState[n.key]

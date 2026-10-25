@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="AlgoTrade", version="1.0.0", lifespan=lifespan,
-                  description="Fault-tolerant algorithmic trading & risk control platform (021 developer sandbox)")
+                  description="Fault-tolerant algorithmic trading & risk control platform (paper trading)")
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])
     for r in (auth, account, market, strategies, orders, trades, risk, resilience, audit, telegram):

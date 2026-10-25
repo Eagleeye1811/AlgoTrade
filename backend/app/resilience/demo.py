@@ -25,7 +25,7 @@ WIPE_TABLES = ["order_events", "position_events", "fills", "orders", "signals", 
                "risk_events", "reconciliation_events", "fault_simulations", "system_events"]
 
 STEPS = [
-    ("market", "Live market data", "021 market-data ticks stream through the candle engine (NSE hours)"),
+    ("market", "Market data", "market-data ticks stream through the candle engine"),
     ("trading", "Start algorithmic trading", "Global trading RUNNING, all strategies enabled"),
     ("first_fill", "Strategy signal -> risk -> order -> fill", "Wait for a strategy to trade on real candles"),
     ("pnl", "Position & P&L update", "Position and P&L computed from the actual fill"),

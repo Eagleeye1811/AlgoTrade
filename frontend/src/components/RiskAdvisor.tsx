@@ -105,7 +105,7 @@ export default function RiskAdvisor({ isAdmin = false, onLimitsApplied }: RiskAd
           }`}
         >
           <UserCheck size={13} className="text-amber-400" />
-          Vedant Gawali (021 Sandbox · Age 21)
+          Vedant Gawali (Age 21)
         </button>
         <button
           type="button"

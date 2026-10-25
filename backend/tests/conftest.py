@@ -39,6 +39,12 @@ def migrated_db():
 def _truncate():
     eng = create_engine(SYNC_DB)
     with eng.begin() as c:
+        # Tests run one at a time, so any other connection to the test database is left over from a finished test: a
+        # task cancelled mid-query can drop its asyncpg connection without closing it, and PostgreSQL then keeps that
+        # transaction (and its locks) open until the connection is garbage-collected - TRUNCATE would wait for it.
+        c.execute(text("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                       "WHERE datname = current_database() AND pid <> pg_backend_pid()"))
+        c.execute(text("SET LOCAL lock_timeout = '10s'"))  # fail fast rather than hang if anything still holds a lock
         tables = [r[0] for r in c.execute(text(
             "select schemaname||'.'||tablename from pg_tables where schemaname in ('public','paper_broker') "
             "and tablename <> 'alembic_version'"))]
@@ -66,6 +72,13 @@ async def system():
     yield sys_
     await sys_.stop_engine()
     await sys_.market.close()
+    # fire-and-forget tasks (fault lab runs, kill-switch monitor, event publishing) would otherwise be destroyed with
+    # the test's event loop mid-transaction, leaving their PostgreSQL connection idle in transaction holding locks
+    left = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
+    for t in left:
+        t.cancel()
+    if left:
+        await asyncio.wait(left, timeout=5)
     await sys_.redis.close()
     await sys_.db.dispose()
 

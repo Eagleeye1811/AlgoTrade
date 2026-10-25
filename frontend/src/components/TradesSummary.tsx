@@ -114,7 +114,7 @@ export function TradeList({ f }: { f: TradeFilter }) {
                   <td className={`num text-right ${pnlClass(x.net)}`}>{fmtSigned(x.net, 2)}</td>
                   <td className="num text-right text-muted">{x.slippage_bps != null ? `${fmtNum(x.slippage_bps, 1)} bps` : '—'}</td>
                   <td className="num text-right text-muted">{x.latency_ms != null ? `${x.latency_ms} ms` : '—'}</td>
-                  <td>{x.source === 'RECONCILIATION' ? <span className="rounded border border-amber-500/40 px-1 text-[10px] text-amber-300" title="recovered from 021 by reconciliation (the execution report was lost)">recon</span> : <span className="text-muted">report</span>}</td>
+                  <td>{x.source === 'RECONCILIATION' ? <span className="rounded border border-amber-500/40 px-1 text-[10px] text-amber-300" title="recovered from the broker by reconciliation (the execution report was lost)">recon</span> : <span className="text-muted">report</span>}</td>
                   <td className="num text-muted">{x.order_id.slice(0, 8)}</td></tr>))}</tbody>
             </table></div>
           )}

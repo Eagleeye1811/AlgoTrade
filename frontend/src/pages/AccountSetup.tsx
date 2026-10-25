@@ -10,7 +10,7 @@ export default function AccountSetup() {
   const { user, logout } = useAuth()
   const { overview, reload } = useSystem()
   const nav = useNavigate()
-  const [name, setName] = useState('021 Sandbox Account (Vedant Gawali)')
+  const [name, setName] = useState('Trading Account (Vedant Gawali)')
   const [capital, setCapital] = useState('1000000')
   const [profile, setProfile] = useState<'vedant' | 'salaried' | 'senior'>('vedant')
   const [err, setErr] = useState<string | null>(null)
@@ -21,7 +21,7 @@ export default function AccountSetup() {
   const selectPreset = (p: 'vedant' | 'salaried' | 'senior') => {
     setProfile(p)
     if (p === 'vedant') {
-      setName('021 Sandbox Account (Vedant Gawali)')
+      setName('Trading Account (Vedant Gawali)')
       setCapital('1000000')
     } else if (p === 'salaried') {
       setName('Primary Trading Account (Salaried 30yr)')
@@ -66,7 +66,9 @@ export default function AccountSetup() {
     <div className="flex min-h-full items-center justify-center p-4">
       <Panel title="Account setup &amp; Risk Profiling" className="w-full max-w-lg" bodyClass="p-5 space-y-4">
         <div className="rounded border border-violet-500/30 bg-violet-500/10 p-3 text-xs text-violet-200">
-          Orders go to the 021 developer sandbox (POST /orders) with the UCC configured on the server; the account has ₹10,00,000 of virtual funds per day on a simulated exchange. Capital here is what the platform allocates to strategies (max ₹10,00,000). No real money is involved.
+          {overview?.broker?.paper
+            ? <>Orders are filled by the local paper-trading simulator against the market feed. Capital here is the virtual money the platform allocates to strategies. No real orders are placed and no real money is involved.</>
+            : <>Orders go to the 021 developer sandbox (POST /orders) with the UCC configured on the server; the account has ₹10,00,000 of virtual funds per day on a simulated exchange. Capital here is what the platform allocates to strategies (max ₹10,00,000). No real money is involved.</>}
         </div>
 
         {/* Profile Presets */}

@@ -132,7 +132,7 @@ class FaultSimulator:
         ctl = sys.controller
         mkt = sys.market.display_status()
         return [
-            ("Broker (021) reachable", sys.broker.available, "connected" if sys.broker.available else "unavailable"),
+            ("Broker reachable", sys.broker.available, "connected" if sys.broker.available else "unavailable"),
             ("Market data flowing", mkt in ("LIVE", "REPLAY"), mkt),
             ("No order blocks", not ctl.blocks, "none" if not ctl.blocks else "; ".join(ctl.blocks.values())),
             ("Not in SAFE MODE", ctl.status != "SAFE_MODE", ctl.status),
@@ -143,8 +143,8 @@ class FaultSimulator:
         await tl.step(AUTOPILOT, "Autopilot engaged", "self-healing verification of the whole platform", "info")
         rec = await sys.reconciler.run("AUTOPILOT", tl.corr)
         rec_ok = rec.get("status") in ("MATCHED", "MISMATCH_RESOLVED")
-        await tl.step(AUTOPILOT, f"Reconciliation vs 021: {rec.get('status')}", rec.get("summary", ""), "ok" if rec_ok else "error")
-        checks = [("Internal state matches 021", rec_ok, rec.get("status", "?"))] + self._checks()
+        await tl.step(AUTOPILOT, f"Reconciliation vs broker: {rec.get('status')}", rec.get("summary", ""), "ok" if rec_ok else "error")
+        checks = [("Internal state matches broker", rec_ok, rec.get("status", "?"))] + self._checks()
         for name, ok, detail in checks[1:]:
             await tl.step(AUTOPILOT, f"{'✔' if ok else '✘'} {name}", detail, "ok" if ok else "error")
         halted = [rt for rt in sys.strategies.runtimes.values() if rt.status == "HALTED"]
@@ -501,7 +501,7 @@ class FaultSimulator:
             persisted = (await s.execute(select(Position).where(Position.quantity != 0))).scalars().all()
         await tl.step(RESPONSE, "Fail-closed: no orders while the engine is down",
                       f"the order path is offline until state is rebuilt and reconciled; {len(persisted)} open position(s) and "
-                      f"{len(self.sys.orders.open_orders)} working order(s) are safe in PostgreSQL / at 021", "warn")
+                      f"{len(self.sys.orders.open_orders)} working order(s) are safe in PostgreSQL / at the broker", "warn")
         await tl.step(RESPONSE, "Trading will come back PAUSED", "after a restart an operator (or the autopilot) must "
                       "confirm before strategies trade again", "info")
 

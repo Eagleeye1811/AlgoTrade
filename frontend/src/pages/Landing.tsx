@@ -377,7 +377,7 @@ export default function Landing() {
                 { num: '02', title: 'Configure', desc: 'Choose strategies, adjust parameters, and define capital allocations and risk limits.', icon: ShieldCheck },
                 { num: '03', title: 'Monitor', desc: 'Observe market candles, strategy signals, orders, positions, and P&L in the dashboard.', icon: Activity },
                 { num: '04', title: 'Protect', desc: 'Let the Risk Firewall validate orders while recovery mechanisms handle abnormal conditions.', icon: ServerCrash },
-              ].map((s, i) => (
+              ].map((s) => (
                 <div key={s.num} className="relative group">
                   {/* Timeline Circle Node */}
                   <div className="hidden md:flex absolute -top-4 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-panel border-2 border-line items-center justify-center group-hover:border-info group-hover:shadow-[0_0_15px_rgba(59,130,246,0.5)] transition-all duration-300 z-10">

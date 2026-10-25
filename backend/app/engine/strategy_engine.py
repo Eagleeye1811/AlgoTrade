@@ -385,18 +385,15 @@ class StrategyEngine:
             self._clock = asyncio.create_task(self._clock_loop(), name="strategy-clock")
 
     async def stop(self) -> None:
-        if self._worker:
-            self._worker.cancel()
-            self._worker = None
-        if self._clock:
-            self._clock.cancel()
-            self._clock = None
-        for rt in self.runtimes.values():
-            if rt.flatten_task:
-                rt.flatten_task.cancel()
-        for rt in self.runtimes.values():
-            if rt.runaway_task:
-                rt.runaway_task.cancel()
+        tasks = [self._worker, self._clock, *self._order_tasks]
+        tasks += [t for rt in self.runtimes.values() for t in (rt.flatten_task, rt.runaway_task)]
+        tasks = [t for t in tasks if t is not None and not t.done()]
+        self._worker = self._clock = None
+        for t in tasks:
+            t.cancel()
+        # wait for them to unwind: a task dropped mid-transaction would keep its database connection (and locks) open
+        if tasks:
+            await asyncio.wait(tasks, timeout=5)
 
     async def _work(self) -> None:
         while True:

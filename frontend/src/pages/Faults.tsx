@@ -54,12 +54,12 @@ export default function Faults() {
   return (
     <div className="space-y-3">
       <h1 className="text-base font-semibold">Fault Simulation &amp; Recovery Lab</h1>
-      <div className="text-xs text-muted">Every scenario injects a real fault into a real component (021 broker adapter boundary, market feed, strategy logic, internal state) and the timeline is built from what the engine actually did.
+      <div className="text-xs text-muted">Every scenario injects a real fault into a real component (broker adapter boundary, market feed, strategy logic, internal state) and the timeline is built from what the engine actually did.
         Test orders go through the full Signal → Risk → Order → Broker path, so trading must be <b>RUNNING</b> {trading && <>— currently <StatusBadge status={trading.status} /></>}.</div>
       <ErrorText error={err} />
 
       <Panel title="Inject a fault" right={<div className="flex items-center gap-2">
-          <button title="After every fault: reconcile with 021, check broker / market data / blocks / SAFE MODE, and resume trading only if everything passes"
+          <button title="After every fault: reconcile with the broker, check broker / market data / blocks / SAFE MODE, and resume trading only if everything passes"
             disabled={user?.role !== 'ADMIN' || !sc.data}
             onClick={async () => { setErr(null); try { await api.put('/faults/autopilot', { enabled: !sc.data?.autopilot }); sc.reload() } catch (e: any) { setErr(e.message) } }}
             className={`btn flex items-center gap-1.5 ${sc.data?.autopilot ? 'border-green-500/60 bg-green-500/15 text-green-300' : ''}`}>
