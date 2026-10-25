@@ -377,7 +377,7 @@ class TelegramService:
         for k, v in ctl["blocks"].items():
             lines.append(f"  ⛔ {esc(v)}")
         ah = m.get("after_hours") or {}
-        src = m.get("source") if m.get("mode") == "REPLAY" else \
+        src = m.get("source") if m.get("mode") == "REPLAY" or m.get("feed") == "angelone" else \
             "replay of the recorded 021 session (after hours)" if "replay" in ah.values() else \
             "021 sandbox stream (after hours)" if ah else "021 live feed"
         lines.append(f"<b>Market data:</b> {esc(m.get('display_status'))} · {src}")

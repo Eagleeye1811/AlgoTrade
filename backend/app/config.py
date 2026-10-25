@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     #                    "paper"  -> local paper-trading simulator (no real orders); also used by the test suite
     #   market_data_mode "o21"    -> 021 market-data websocket
     #                    "replay" -> latest recorded NSE session (Yahoo Finance 1m candles) replayed in real time
+    #                    "angelone" -> Angel One SmartAPI live NSE prices; the "replay" feed outside the session
     #                    "manual" -> test feed
     broker_mode: str = "o21"
     market_data_mode: str = "o21"
@@ -58,6 +59,13 @@ class Settings(BaseSettings):
     replay_step_s: float = 15.0
     stale_after_s_manual: float = 6.0
     replay_dir: str = "data/replay"  # cache of the Yahoo Finance 1m candles replayed in market_data_mode "replay"
+
+    # Angel One SmartAPI (market_data_mode "angelone"; credentials only from .env). Market data only: no orders.
+    angel_api_key: str = ""
+    angel_client_code: str = ""
+    angel_pin: str = ""
+    angel_totp_secret: str = ""  # base32 secret shown once when TOTP is enabled (not the 6-digit code)
+    angel_tokens_path: str = "data/angelone_tokens.json"  # NSE instrument tokens from the public scrip master
 
     # Account: 021 gives ₹10,00,000 virtual funds, topped up every trading day
     starting_capital: Decimal = Decimal("1000000")

@@ -264,7 +264,8 @@ export default function MarketChart({ symbols, symbol: controlled, onSymbolChang
       {/* footer: feed details */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-4 py-1.5 text-[11px] text-muted">
         {market?.mode === 'REPLAY' && <span title={market.source}>replay of a recorded NSE session · not live</span>}
-        {market?.mode === 'LIVE' && <span title="021 market-data websocket: updates at most every 300 ms per changed instrument; candles are built from these ticks">021 live feed · updates ≤ 300 ms</span>}
+        {market?.mode === 'LIVE' && market.feed === 'angelone' && <span title={market.source}>Angel One live feed · NSE</span>}
+        {market?.mode === 'LIVE' && market.feed !== 'angelone' && <span title="021 market-data websocket: updates at most every 300 ms per changed instrument; candles are built from these ticks">021 live feed · updates ≤ 300 ms</span>}
         <span className="ml-auto">{count} candles · times IST · markers: strategy signals</span>
       </div>
     </div>

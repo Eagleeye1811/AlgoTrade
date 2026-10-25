@@ -1,7 +1,7 @@
 """MarketDataService: runs the provider, feeds the Candle Engine, tracks freshness, fans out ticks.
 
 Modes: "o21" (021 market-data websocket), "replay" (latest recorded NSE session from Yahoo Finance, replayed in real
-time) and "manual" (automated tests).
+time), "angelone" (Angel One SmartAPI live prices, the replay outside the session) and "manual" (automated tests).
 021 has no candle-history endpoint, so every candle the platform builds is persisted (market_bars, source
 "ticks") and the last days are reloaded at startup to warm indicators.
 """
@@ -21,6 +21,7 @@ from app.core.events import Event
 from app.core.health import FAILED, HEALTHY, WARNING
 from app.database.models import MarketBar
 from app.market.candle_engine import CandleEngine
+from app.market.angelone import AngelOneProvider
 from app.market.models import DELAYED, DISCONNECTED, LIVE, REPLAY, STALE, STOPPED, Bar, Tick
 from app.market.providers import (IST, DayStats, ManualProvider, MarketDataProvider, O21MarketProvider,
                                   YahooReplayProvider, nse_market_open)
@@ -35,6 +36,7 @@ CLOSE_GRACE_S = 3.0
 SANDBOX_SOURCE = "021-sandbox"  # market_bars.source of candles built from the after-hours sandbox stream
 REPLAY_SOURCE = "021-replay"    # market_bars.source of candles built from the after-hours session replay
 YAHOO_REPLAY_SOURCE = "yahoo-replay"  # market_bars.source of candles built from the Yahoo session replay (mode "replay")
+ANGEL_SOURCE = "angelone"  # market_bars.source of candles built from Angel One live ticks
 AFTER_HOURS_SOURCES = {"sandbox": SANDBOX_SOURCE, "replay": REPLAY_SOURCE}
 SOURCE_KIND = {v: k for k, v in AFTER_HOURS_SOURCES.items()}
 REPLAY_LOOKBACK_DAYS = 10
@@ -67,6 +69,11 @@ class MarketDataService:
             return ManualProvider(syms)
         if mode == "replay":
             return YahooReplayProvider(syms, self.settings.replay_dir, self.settings.replay_step_s)
+        if mode == "angelone":
+            st = self.settings
+            return AngelOneProvider(syms, st.angel_api_key, st.angel_client_code, st.angel_pin, st.angel_totp_secret,
+                                    st.angel_tokens_path, YahooReplayProvider(syms, st.replay_dir, st.replay_step_s),
+                                    market_open=lambda: self.is_market_open())
         return O21MarketProvider(syms, self.sys.o21, self.sys.instruments, self.settings.o21_ws_market_url,
                                  self.settings.o21_sandbox_stream_after_s, replay=self.settings.after_hours_replay,
                                  replay_step_s=self.settings.replay_step_s, market_open=lambda: self.is_market_open())
@@ -207,6 +214,8 @@ class MarketDataService:
     def _bar_source(self, symbol: str, bar: Bar) -> str:
         if isinstance(self.provider, YahooReplayProvider):
             return YAHOO_REPLAY_SOURCE
+        if isinstance(self.provider, AngelOneProvider):
+            return YAHOO_REPLAY_SOURCE if self.provider.replaying else ANGEL_SOURCE
         ah = self.after_hours(symbol)
         return AFTER_HOURS_SOURCES[ah[0]] if ah is not None and bar.ts + timedelta(minutes=1) > ah[1] else "ticks"
 
@@ -332,7 +341,7 @@ class MarketDataService:
     async def _watch(self) -> None:
         while True:
             try:
-                if isinstance(self.provider, (O21MarketProvider, YahooReplayProvider)):
+                if isinstance(self.provider, (O21MarketProvider, YahooReplayProvider, AngelOneProvider)):
                     await self.close_due_candles()
                 if isinstance(self.provider, O21MarketProvider):
                     if not self.is_market_open() and time.monotonic() - self._replay_refreshed > 60:
