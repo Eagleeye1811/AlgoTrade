@@ -85,6 +85,53 @@ class OrderEngine:
             if o.status == "TIMEOUT":
                 await self.sys.controller.block(f"uncertain:{o.id}", f"order {str(o.id)[:8]} status unknown since before restart")
 
+    async def adopt_external(self, broker_order_id: str, strategy_id: str, actor: str) -> dict[str, Any]:
+        """Attach an order placed at the broker outside the platform (e.g. by hand in the 021 web app) to the strategy
+        whose position it closes, so its fills update that strategy's book and reconciliation can match again. Only an
+        unknown order that reduces the strategy's position in the same stock is accepted."""
+        sys = self.sys
+        rt = sys.strategies.runtimes.get(strategy_id)
+        if rt is None:
+            raise ValueError("unknown strategy")
+        adapter = sys.broker.adapter
+        bo = await sys.broker.call("get_order", lambda: adapter.get_order(broker_order_id))
+        if bo is None:
+            raise ValueError(f"broker order {broker_order_id} not found")
+        async with sys.db.session() as s:
+            known = (await s.execute(select(Order).where(Order.broker_order_id == broker_order_id))).scalar_one_or_none()
+        if known is not None:
+            raise ValueError(f"broker order {broker_order_id} is already order {str(known.id)[:8]} of {known.strategy_id}")
+        if bo.symbol != rt.symbol:
+            raise ValueError(f"broker order is {bo.symbol}, the strategy trades {rt.symbol}")
+        pos = sys.positions.get(strategy_id, rt.symbol).quantity
+        if pos == 0 or (bo.side == "SELL") != (pos > 0) or bo.quantity > abs(pos):
+            raise ValueError(f"the order ({bo.side} {bo.quantity}) does not reduce {strategy_id}'s position ({pos:+})")
+        cid = f"EXT-{broker_order_id}"
+        now = utcnow()
+        status = "PARTIALLY_FILLED" if bo.filled_quantity else "ACKNOWLEDGED"
+        corr = uuid.uuid4().hex
+        async with sys.db.transaction() as s:
+            o = Order(client_order_id=cid, strategy_id=strategy_id, symbol=bo.symbol, side=bo.side,
+                      order_type="LIMIT" if bo.limit_price else "MARKET", quantity=bo.quantity, filled_quantity=Decimal(0),
+                      limit_price=bo.limit_price, status="ACKNOWLEDGED", broker_order_id=broker_order_id, correlation_id=corr,
+                      origin="EXTERNAL", reduce_only=True, submitted_at=bo.created_at or now, acknowledged_at=now)
+            s.add(o)
+            await s.flush()
+            s.add(OrderEvent(order_id=o.id, status="ACKNOWLEDGED",
+                             message=f"external broker order {broker_order_id} adopted by {actor} into {strategy_id}"))
+        self.open_orders[str(o.id)] = self._info(o)
+        if hasattr(adapter, "by_order"):  # 021: map the broker order to our id, then read its fills
+            adapter.by_order[broker_order_id] = cid
+            adapter.open_ids.add(broker_order_id)
+            await adapter.refresh(broker_order_id)
+        await sys.audit.record("EXTERNAL_ORDER_ADOPTED", f"broker order {broker_order_id} ({bo.side} {bo.quantity} {bo.symbol}, "
+                               f"{bo.filled_quantity} filled, placed outside AlgoTrade) adopted into {strategy_id} by {actor}",
+                               source="OrderEngine", severity="WARN", actor=actor, strategy_id=strategy_id,
+                               order_id=str(o.id), symbol=bo.symbol, correlation_id=corr)
+        await sys.reconciler.request("EXTERNAL_ADOPTED")
+        return {"order_id": str(o.id), "client_order_id": cid, "broker_status": status,
+                "position": sys.positions.get(strategy_id, rt.symbol).quantity}
+
     def _info(self, o: Order) -> OpenOrderInfo:
         return OpenOrderInfo(str(o.id), o.client_order_id, o.strategy_id, o.symbol, o.side, o.quantity,
                              o.filled_quantity, o.order_type, o.reduce_only, o.reference_price, o.broker_order_id,

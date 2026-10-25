@@ -51,6 +51,12 @@ class FakeExchange:
             self.posts.append(body)
             if self.post_mode == "500_reject":
                 return self.env(None, 500, False, "RMS: insufficient funds")
+            if self.post_mode == "wide_then_circuit" and body["price"] == 0:
+                return self.env(None, 500, False, "Market orders are rejected because bid-ask spread is wide. Please place limit orders")
+            if self.post_mode == "wide_then_circuit" and body["qty"] < 0 and body["price"] <= 120620:
+                return self.env(None, 500, False, f"Price {body['price'] / 100:,.2f} must be higher than the lower circuit limit 1,206.20")
+            if self.post_mode == "wide_spread" and body["price"] == 0:
+                return self.env(None, 500, False, "Market orders are rejected because bid-ask spread is wide. Please place limit orders")
             oid = self.next_id
             self.next_id += 1
             self.orders[oid] = {"orderId": oid, "time": int(time.time()), "lastActivity": int(time.time()), "token": body["token"],
@@ -226,3 +232,31 @@ def test_partial_fill_hold_splits_and_releases_fills():
     rest = a._held(hold, rep)
     assert rest.fill_id == "021-77/2" and rest.quantity == 6 and rest.cumulative_filled == 10
     assert a._held(hold, rep) is None
+
+
+async def test_wide_spread_market_rejection_is_resent_as_marketable_limit(ex):
+    """021 refuses MARKET orders while the spread is wide: the order (confirmed absent) is resent once as a LIMIT at
+    the circuit band edge - sells at the lower, buys at the upper limit - so emergency closes still execute."""
+    a = adapter(ex)
+    ex.post_mode = "wide_spread"
+    inst = a.instruments.nse("RELIANCE")
+    o = await a.place_order(PlaceOrderRequest("AT-W1", "RELIANCE", "SELL", D(5), "MARKET"))
+    assert o.broker_order_id and len(ex.posts) == 2
+    assert ex.posts[0]["price"] == 0 and ex.posts[1]["price"] == inst.lower_circuit and ex.posts[1]["qty"] == -5
+    await a.place_order(PlaceOrderRequest("AT-W2", "RELIANCE", "BUY", D(5), "MARKET"))
+    assert ex.posts[3]["price"] == inst.upper_circuit and a.converted_to_limit == 2
+    # any other rejection is still final and never resent
+    ex.post_mode = "500_reject"
+    with pytest.raises(BrokerRejected, match="insufficient funds"):
+        await a.place_order(PlaceOrderRequest("AT-W3", "RELIANCE", "SELL", D(5), "MARKET"))
+    assert len(ex.posts) == 5
+
+
+async def test_sandbox_circuit_limit_from_the_rejection_is_used(ex):
+    """The sandbox's own circuit band can differ from the instruments file: the limit 021 names is used (one tick
+    inside it) for one more attempt."""
+    a = adapter(ex)
+    ex.post_mode = "wide_then_circuit"
+    o = await a.place_order(PlaceOrderRequest("AT-C1", "RELIANCE", "SELL", D(5), "MARKET"))
+    tick = max(1, a.instruments.nse("RELIANCE").ticksize)
+    assert o.broker_order_id and [b["price"] for b in ex.posts][-1] == 120620 + tick and len(ex.posts) == 3

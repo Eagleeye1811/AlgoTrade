@@ -386,3 +386,14 @@ async def test_every_fault_step_is_in_the_audit_trail(trading):
                                                           SystemEvent.event_type == "FAULT_STEP"))).scalars().all()
     assert len(rows) == len(res["steps"]) and all(r.strategy_id == "macd" for r in rows)
     assert any(r.message.startswith("[Internal state corruption] Fault injected:") for r in rows)
+
+
+async def test_adopting_an_external_order_must_reduce_the_strategy_position(trading):
+    import pytest
+    from app.brokers.base import PlaceOrderRequest
+    sys_ = trading
+    bo = await sys_.broker.adapter.place_order(PlaceOrderRequest("MANUAL-1", "RELIANCE", "BUY", D(5)))
+    with pytest.raises(ValueError, match="does not reduce"):   # macd is flat: nothing to reduce
+        await sys_.orders.adopt_external(bo.broker_order_id, "macd", "admin")
+    with pytest.raises(ValueError, match="not found"):
+        await sys_.orders.adopt_external("999999", "macd", "admin")

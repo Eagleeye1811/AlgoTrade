@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -53,6 +54,17 @@ class Journal:
     price: int               # paise, 0 = market
     sent_at: float           # unix seconds
     order_id: str | None = None
+
+
+WIDE_SPREAD = "bid-ask spread is wide"  # 021 RMS text when it refuses a MARKET order
+_CIRCUIT_RE = re.compile(r"(?:lower|upper) circuit limit\s*([0-9][0-9,]*(?:\.[0-9]+)?)", re.I)
+
+
+def _circuit_from_reason(reason: str) -> int | None:
+    """Circuit limit in paise from a 021 rejection such as 'Price 1,060.20 must be higher than the lower circuit
+    limit 1,206.20'; None if the text names no limit."""
+    m = _CIRCUIT_RE.search(reason or "")
+    return int((Decimal(m.group(1).replace(",", "")) * 100).to_integral_value()) if m else None
 
 
 @dataclass
@@ -110,6 +122,7 @@ class O21Adapter(BrokerAdapter):
         self.open_ids: set[str] = set()
         self.seen_trades: set[str] = set()
         self.partial_holds: dict[str, dict] = {}       # broker order id -> partial-fill simulation state
+        self.converted_to_limit = 0                     # MARKET orders resent as marketable LIMIT (wide spread)
         self._split_done: dict[str, Decimal] = {}      # 021 trade id -> quantity already reported
         self.last_status: dict[str, str] = {}
         self.square_off: dict[str, int] = {}         # symbol -> squareOffQuantity (latest positions read)
@@ -170,14 +183,37 @@ class O21Adapter(BrokerAdapter):
         j = Journal(req.client_order_id, req.symbol, inst.token, qty, price, time.time())
         self.journal[req.client_order_id] = j
         try:
-            res = await self._call(self.client.request("POST", "/orders", body, safe=False))
-        except UncertainOrder as e:
-            found = await self._find_unclaimed(j)
-            if found is not None:
-                return found
-            if e.status == 500 and e.error:  # confirmed absent + an error text: 021 risk rejection, not retried
-                raise BrokerRejected(e.error) from e
-            raise
+            res, found = await self._post_order(j, body)
+        except BrokerRejected as e:
+            # 021 refuses MARKET orders while the bid-ask spread is wide ("Please place limit orders"). The order is
+            # confirmed absent, so resend it once as a marketable LIMIT at the circuit band edge (sell at the lower,
+            # buy at the upper limit): the exchange still fills at the best available price; the limit only caps it.
+            edge = inst.upper_circuit if qty > 0 else inst.lower_circuit
+            if price != 0 or WIDE_SPREAD not in str(e).lower() or edge <= 0:
+                raise
+            log.warning("021 rejected MARKET %s %s (%s) - resending as marketable LIMIT @ %s paise",
+                        req.side, req.symbol, e, edge)
+            body["price"] = edge
+            j = Journal(req.client_order_id, req.symbol, inst.token, qty, edge, time.time())
+            self.journal[req.client_order_id] = j
+            try:
+                res, found = await self._post_order(j, body)
+            except BrokerRejected as e2:
+                # the sandbox enforces its own circuit band (can differ from the instruments file): 021 names the
+                # limit ("... must be higher than the lower circuit limit 1,206.20") - resend once just inside it
+                live = _circuit_from_reason(str(e2))
+                if live is None:
+                    raise
+                tick = max(1, inst.ticksize)
+                edge = live + tick if qty < 0 else live - tick
+                log.warning("021 circuit limit is %s paise - resending %s %s as LIMIT @ %s paise", live, req.side, req.symbol, edge)
+                body["price"] = edge
+                j = Journal(req.client_order_id, req.symbol, inst.token, qty, edge, time.time())
+                self.journal[req.client_order_id] = j
+                res, found = await self._post_order(j, body)
+            self.converted_to_limit += 1
+        if found is not None:
+            return found
         oid = str((res.get("data") or {}).get("orderId") or "")
         if not oid:
             raise BrokerRejected(f"021 returned no order id: {res}")
@@ -193,6 +229,20 @@ class O21Adapter(BrokerAdapter):
         asyncio.create_task(self.refresh(oid))
         return BrokerOrder(oid, req.client_order_id, req.symbol, req.side, req.order_type, req.quantity, Decimal(0), None,
                            req.limit_price, "OPEN", req.tag, created_at=datetime.now(timezone.utc))
+
+    async def _post_order(self, j: Journal, body: dict) -> tuple[dict | None, BrokerOrder | None]:
+        """POST /orders once. Ambiguous failures are resolved against the order book: returns (response, None), or
+        (None, order) when the order turns out to exist; raises BrokerRejected when it is confirmed absent with an
+        error text (021 risk rejection)."""
+        try:
+            return await self._call(self.client.request("POST", "/orders", body, safe=False)), None
+        except UncertainOrder as e:
+            found = await self._find_unclaimed(j)
+            if found is not None:
+                return None, found
+            if e.status == 500 and e.error:  # confirmed absent + an error text: 021 risk rejection, not retried
+                raise BrokerRejected(e.error) from e
+            raise
 
     def _claim(self, j: Journal, oid: str) -> None:
         j.order_id = oid

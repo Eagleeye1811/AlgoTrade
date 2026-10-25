@@ -49,6 +49,20 @@ async def recon_adopt_baseline(user: User = Depends(require_admin), sys: Trading
         raise HTTPException(400, str(e))
 
 
+class AdoptIn(BaseModel):
+    broker_order_id: str
+    strategy_id: str
+
+
+@router.post("/reconciliation/adopt-order")
+async def adopt_order(body: AdoptIn, user: User = Depends(require_admin), sys: TradingSystem = Depends(get_system)):
+    """ADMIN: attach a broker order placed outside AlgoTrade to the strategy whose position it closes."""
+    try:
+        return await sys.orders.adopt_external(body.broker_order_id.strip(), body.strategy_id, actor(user))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.get("/broker/state")
 async def broker_state(_: User = Depends(current_user), sys: TradingSystem = Depends(get_system)):
     """The broker's own view (021 positions + order book) for side-by-side comparison with the internal books."""
@@ -62,7 +76,7 @@ async def broker_state(_: User = Depends(current_user), sys: TradingSystem = Dep
     except Exception as e:
         raise HTTPException(503, f"broker unreachable: {e}")
     return {"account": acct.__dict__, "positions": [p.__dict__ for p in pos],
-            "orders": [o.to_dict() for o in orders[-50:]], "internal_net": sys.positions.net_by_symbol(),
+            "orders": [o.to_dict() for o in sorted(orders, key=lambda o: o.created_at.timestamp() if o.created_at else 0, reverse=True)[:50]], "internal_net": sys.positions.net_by_symbol(),
             "faults": a.faults.to_dict(), "gateway": sys.broker.info()}
 
 
